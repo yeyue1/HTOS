@@ -18,7 +18,7 @@ htOS是一个专为ARM Cortex-M3微控制器设计的轻量级实时操作系统
 ## 文件结构
 
 ```
-htOS--cm3/
+htOS/
 ├── kernel/       - 内核源代码
 │   ├── htlist.c      - 列表管理实现
 │   ├── htmem.c       - 内存管理实现
@@ -29,16 +29,20 @@ htOS--cm3/
 │   ├── httask.c      - 任务管理实现
 │   └── htutils.c     - 工具函数
 └── include/      - 头文件
-    ├── htconfig.h    - 系统配置
-    ├── htlist.h      - 列表API定义
-    ├── htmem.h       - 内存管理API
-    ├── htos.h        - 系统API定义
-    ├── htqueue.h     - 队列API定义
-    ├── htscheduler.h - 调度器API定义
-    ├── htsemaphore.h - 信号量API定义
-    ├── httask.h      - 任务API定义
-    ├── httypes.h     - 类型定义
-    └── htutils.h     - 工具函数API
+│   ├── htconfig.h    - 系统配置
+│   ├── htlist.h      - 列表API定义
+│   ├── htmem.h       - 内存管理API
+│   ├── htos.h        - 系统API定义
+│   ├── htqueue.h     - 队列API定义
+│   ├── htscheduler.h - 调度器API定义
+│   ├── htsemaphore.h - 信号量API定义
+│   ├── httask.h      - 任务API定义
+│   ├── httypes.h     - 类型定义
+│   └── htutils.h     - 工具函数API
+└─portable
+	 └──Cortex-M
+			├──htPort.h		 	-cm3中断调度头文件
+			└──htPortContext.c	 -cm3中断调度
 ```
 
 ## 使用方法
