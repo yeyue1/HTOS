@@ -41,7 +41,7 @@ htOS/
 │   └── htutils.h     - 工具函数API
 └─portable
      └──Cortex-M
-	├──htPort.h		 	-cm3中断调度头文件
+	├──htPort.h		 -cm3中断调度头文件
 	└──htPortContext.c	 -cm3中断调度
 ```
 
