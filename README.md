@@ -40,9 +40,9 @@ htOS/
 │   ├── httypes.h     - 类型定义
 │   └── htutils.h     - 工具函数API
 └─portable
-	 └──Cortex-M
-			├──htPort.h		 	-cm3中断调度头文件
-			└──htPortContext.c	 -cm3中断调度
+     └──Cortex-M
+	├──htPort.h		 	-cm3中断调度头文件
+	└──htPortContext.c	 -cm3中断调度
 ```
 
 ## 使用方法
