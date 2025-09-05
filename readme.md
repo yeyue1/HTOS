@@ -161,6 +161,82 @@ if(htSemaphoreTake(xSemaphore, htTimeToTicks(100)) == htPASS) {
 - `htPortMalloc()` - 分配内存
 - `htPortFree()` - 释放内存
 
+## htmem 使用说明
+
+`htmem` 实现基于 TLSF（Two‑Level Segregated Fit），提供实时性友好的动态内存分配接口。以下为使用要点、API 示例与调优建议。
+
+主要 API
+- `void htMemInit(void);`              // 可选：显式初始化堆（首次分配会自动初始化）
+- `void *htPortMalloc(size_t size);`   // 分配内存（按 TLSF_ALIGN_SIZE 对齐），失败返回 NULL
+- `void htPortFree(void *ptr);`        // 释放内存（自动合并相邻空闲块）
+- `size_t htGetFreeHeapSize(void);`    // 当前可用堆大小（字节）
+- `size_t htGetMinimumEverFreeHeapSize(void);` // 运行期间出现过的最小空闲量（用于评估内存峰值）
+- `size_t htGetTotalHeapSize(void);`   // 配置的总堆大小（configTOTAL_HEAP_SIZE）
+
+初始化与示例
+- 推荐在系统启动时调用 `htMemInit()`，但不调用也会在第一次 `htPortMalloc` 时自动初始化。
+示例：
+```c
+// 在 main 或系统初始化阶段
+htMemInit();
+
+// 分配与释放
+void *p = htPortMalloc(256);
+if (p == NULL) {
+    // 处理分配失败：记录/降级/重试
+}
+htPortFree(p);
+```
+
+对齐与有效负载
+- 分配大小会向上对齐到 `TLSF_ALIGN_SIZE`（默认 4 字节）。
+- 分配请求会额外包含块头开销（`TLSF_BLOCK_HEADER_SIZE`），因此应考虑实际可用字节。
+
+线程安全与中断
+- 当前实现通过禁用中断保护临界区（适合单核 Cortex‑M）。
+- 在 ISR 内尽量避免调用 `htPortMalloc` / `htPortFree`；若必须，请确保短时调用并检查失败。更推荐在中断中使用固定大小内存池或事先分配的缓冲区。
+
+大块分配与限制
+- 堆总大小由 `configTOTAL_HEAP_SIZE` 决定（`htconfig.h`）。若有任务栈或大缓冲区需求（例如 2KB+），请确保堆足够大或改为静态/链接时分配。
+- 若需要频繁大块分配，建议：
+  - 提高 `configTOTAL_HEAP_SIZE`；
+  - 或对大对象使用专用“回退大块分配器”或静态保留区域。
+
+运行时监控与调试
+- 获取当前剩余与历史最小剩余：
+```c
+size_t free_now = htGetFreeHeapSize();
+size_t min_free = htGetMinimumEverFreeHeapSize();
+```
+- 在内存紧张时记录 `min_free` 以调整堆大小或优化分配策略。
+- 可在调试版本中增加断言/日志检查分配失败点，便于定位内存泄漏。
+
+最佳实践
+- 任务栈优先静态分配或在创建任务时一次性分配并尽量避免频繁动态分配。
+- 对于固定尺寸对象（消息、buffer），优先使用固定大小内存池（pool/slab），性能更稳定且无碎片。
+- 在资源受限场景，将 TLSF 用作通用分配器，同时为高频短寿命对象配置专用池，达到性能与利用率折中。
+
+配置项
+- `configTOTAL_HEAP_SIZE`（在 `include/htconfig.h` 中定义）控制堆总大小。根据任务栈、队列、缓存等最大同时需求估算并设置合理值。
+
+常见问题与处理
+- 分配失败但总内存看似足够：检查碎片（`free_now` 可能小于任意连续空闲块），考虑调整策略或使用大块保留区。
+- 非确定性延迟问题：避免在实时临界路径频繁分配，或改用固定池 / TLSF 参数调优以减小最坏延时。
+
+示例：在任务创建中安全使用 htmem
+```c
+void TaskInit(void)
+{
+    // 为任务创建必要的缓冲区（优先静态或在初始化阶段一次分配）
+    uint8_t *buf = htPortMalloc(512);
+    if (!buf) {
+        // 记录并降级功能，避免在运行中重复尝试大量分配
+    }
+    // 使用后在适当时机释放
+    // htPortFree(buf);
+}
+```
+
 ## Trace / CoreDump 集成（MCoreDump）
 
 项目包含 Trace/coredump 模块，用于在故障时生成 ELF 格式的 coredump（可串口输出、保存到内存或文件系统）。
@@ -250,4 +326,4 @@ htOS依赖于ARM Cortex-M3的PendSV机制实现任务切换。移植到其他平
 ## 个人申明
 代码完全开源，目前还有很多功能待完善，仅作学习用。
 
-希望这个RTOS内核及其 CoreDump 模块能帮助你更方便地调试嵌入式系统问题。
+希望这个RTOS内核能帮助你更方便地调试嵌入式系统问题。
