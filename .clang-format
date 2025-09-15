@@ -1,0 +1,23 @@
+# Language:	Cpp
+# BasedOnStyle: Google
+
+# 开括号(开圆括号、开尖括号、开方括号)后的对齐: Align, DontAlign, AlwaysBreak(总是在开括号后换行)
+AlignAfterOpenBracket: DontAlign
+# 连续赋值时，对齐所有等号
+AlignConsecutiveAssignments: false
+AlignTrailingComments: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLoopsOnASingleLine: false
+AlwaysBreakAfterReturnType: None
+BreakBeforeBraces: Linux
+ColumnLimit: 120
+CommentPragmas: NOLINT:.*
+ContinuationIndentWidth: 8
+DerivePointerAlignment: false
+IndentWidth: 4
+PointerAlignment: Right
+SortIncludes: false
+TabWidth: 4
+# 控制 case 标签是否缩进
+IndentCaseLabels: true
+UseTab: ForContinuationAndIndentation
