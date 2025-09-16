@@ -7,16 +7,8 @@
 
 #include <stdint.h>
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
 
 
->>>>>>> db6a41e (change)
-=======
-
-
->>>>>>> main/main
 /**
  * 启动第一个任务
  */

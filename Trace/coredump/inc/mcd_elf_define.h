@@ -5,15 +5,7 @@
  *
  * Change Logs:
  * Date           Author       Notes
-<<<<<<< HEAD
-<<<<<<< HEAD
- * 2025-08-16     Rbb666       first version
-=======
  * 2025-08-16     Yeyue       first version
->>>>>>> db6a41e (change)
-=======
- * 2025-08-16     Yeyue       first version
->>>>>>> main/main
  */
 
 #ifndef __MCD_ELF_DEFINE_H__
@@ -362,125 +354,6 @@
 
 /* Values of note segment descriptor types for core files.  */
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-#define NT_PRSTATUS    1        /* Contains copy of prstatus struct */
-#define NT_FPREGSET    2        /* Contains copy of fpregset struct */
-#define NT_PRPSINFO    3        /* Contains copy of prpsinfo struct */
-#define NT_TASKSTRUCT    4        /* Contains copy of task struct */
-#define NT_AUXV        6        /* Contains copy of Elfxx_auxv_t */
-#define NT_PRXFPREG    0x46e62b7f    /* Contains a user_xfpregs_struct; */
-/*   note name must be "LINUX".  */
-#define NT_PPC_VMX    0x100        /* PowerPC Altivec/VMX registers */
-/*   note name must be "LINUX".  */
-#define NT_PPC_VSX    0x102        /* PowerPC VSX registers */
-/*   note name must be "LINUX".  */
-#define NT_PPC_TAR    0x103        /* PowerPC Target Address Register */
-/*   note name must be "LINUX".  */
-#define NT_PPC_PPR    0x104        /* PowerPC Program Priority Register */
-/*   note name must be "LINUX".  */
-#define NT_PPC_DSCR    0x105        /* PowerPC Data Stream Control Register */
-/*   note name must be "LINUX".  */
-#define NT_PPC_EBB    0x106        /* PowerPC Event Based Branch Registers */
-/*   note name must be "LINUX".  */
-#define NT_PPC_PMU    0x107        /* PowerPC Performance Monitor Registers */
-/*   note name must be "LINUX".  */
-#define NT_PPC_TM_CGPR    0x108        /* PowerPC TM checkpointed GPR Registers */
-/*   note name must be "LINUX".  */
-#define NT_PPC_TM_CFPR    0x109        /* PowerPC TM checkpointed FPR Registers */
-/*   note name must be "LINUX".  */
-#define NT_PPC_TM_CVMX    0x10a        /* PowerPC TM checkpointed VMX Registers */
-/*   note name must be "LINUX".  */
-#define NT_PPC_TM_CVSX    0x10b        /* PowerPC TM checkpointed VSX Registers */
-/*   note name must be "LINUX".  */
-#define NT_PPC_TM_SPR    0x10c        /* PowerPC TM Special Purpose Registers */
-/*   note name must be "LINUX".  */
-#define NT_PPC_TM_CTAR    0x10d        /* PowerPC TM checkpointed TAR */
-/*   note name must be "LINUX".  */
-#define NT_PPC_TM_CPPR    0x10e        /* PowerPC TM checkpointed PPR */
-/*   note name must be "LINUX".  */
-#define NT_PPC_TM_CDSCR    0x10f        /* PowerPC TM checkpointed Data SCR */
-/*   note name must be "LINUX".  */
-#define NT_386_TLS    0x200        /* x86 TLS information */
-/*   note name must be "LINUX".  */
-#define NT_386_IOPERM    0x201        /* x86 io permissions */
-/*   note name must be "LINUX".  */
-#define NT_X86_XSTATE    0x202        /* x86 XSAVE extended state */
-/*   note name must be "LINUX".  */
-#define NT_X86_CET    0x203        /* x86 CET state.  */
-/*   note name must be "LINUX".  */
-#define NT_S390_HIGH_GPRS 0x300        /* S/390 upper halves of GPRs  */
-/*   note name must be "LINUX".  */
-#define NT_S390_TIMER    0x301        /* S390 timer */
-/*   note name must be "LINUX".  */
-#define NT_S390_TODCMP    0x302        /* S390 TOD clock comparator */
-/*   note name must be "LINUX".  */
-#define NT_S390_TODPREG    0x303        /* S390 TOD programmable register */
-/*   note name must be "LINUX".  */
-#define NT_S390_CTRS    0x304        /* S390 control registers */
-/*   note name must be "LINUX".  */
-#define NT_S390_PREFIX    0x305        /* S390 prefix register */
-/*   note name must be "LINUX".  */
-#define NT_S390_LAST_BREAK      0x306   /* S390 breaking event address */
-/*   note name must be "LINUX".  */
-#define NT_S390_SYSTEM_CALL     0x307   /* S390 system call restart data */
-/*   note name must be "LINUX".  */
-#define NT_S390_TDB    0x308        /* S390 transaction diagnostic block */
-/*   note name must be "LINUX".  */
-#define NT_S390_VXRS_LOW    0x309    /* S390 vector registers 0-15 upper half */
-/*   note name must be "LINUX".  */
-#define NT_S390_VXRS_HIGH    0x30a    /* S390 vector registers 16-31 */
-/*   note name must be "LINUX".  */
-#define NT_S390_GS_CB    0x30b        /* s390 guarded storage registers */
-/*   note name must be "LINUX".  */
-#define NT_S390_GS_BC    0x30c        /* s390 guarded storage broadcast control block */
-/*   note name must be "LINUX".  */
-#define NT_ARM_VFP    0x400        /* ARM VFP registers */
-/* The following definitions should really use NT_AARCH_..., but defined
-   this way for compatibility with Linux.  */
-#define NT_ARM_TLS    0x401        /* AArch TLS registers */
-/*   note name must be "LINUX".  */
-#define NT_ARM_HW_BREAK    0x402        /* AArch hardware breakpoint registers */
-/*   note name must be "LINUX".  */
-#define NT_ARM_HW_WATCH    0x403        /* AArch hardware watchpoint registers */
-/*   note name must be "LINUX".  */
-#define NT_ARM_SVE    0x405        /* AArch SVE registers.  */
-/*   note name must be "LINUX".  */
-#define NT_ARM_PAC_MASK    0x406        /* AArch pointer authentication code masks */
-/*   note name must be "LINUX".  */
-#define NT_ARC_V2    0x600        /* ARC HS accumulator/extra registers.  */
-/*   note name must be "LINUX".  */
-#define NT_SIGINFO    0x53494749    /* Fields of siginfo_t.  */
-#define NT_FILE        0x46494c45    /* Description of mapped files.  */
-
-/* Values for program header, p_type field.  */
-
-#define PT_NULL        0        /* Program header table entry unused */
-#define PT_LOAD        1        /* Loadable program segment */
-#define PT_DYNAMIC    2        /* Dynamic linking information */
-#define PT_INTERP    3        /* Program interpreter */
-#define PT_NOTE        4        /* Auxiliary information */
-#define PT_SHLIB    5        /* Reserved, unspecified semantics */
-#define PT_PHDR        6        /* Entry for header table itself */
-#define PT_TLS        7        /* Thread local storage segment */
-#define PT_LOOS        0x60000000    /* OS-specific */
-#define PT_HIOS        0x6fffffff    /* OS-specific */
-#define PT_LOPROC    0x70000000    /* Processor-specific */
-#define PT_HIPROC    0x7FFFFFFF    /* Processor-specific */
-
-/* Program segment permissions, in program header p_flags field.  */
-
-#define PF_X        (1 << 0)    /* Segment is executable */
-#define PF_W        (1 << 1)    /* Segment is writable */
-#define PF_R        (1 << 2)    /* Segment is readable */
-/* #define PF_MASKOS    0x0F000000    *//* OS-specific reserved bits */
-#define PF_MASKOS    0x0FF00000    /* New value, Oct 4, 1999 Draft */
-#define PF_MASKPROC    0xF0000000    /* Processor-specific reserved bits */
-
-#define CORE_MEM_LINE_MASK  0xFFFFFFC0
-=======
-=======
->>>>>>> main/main
 #define NT_PRSTATUS 1          /* Contains copy of prstatus struct */
 #define NT_FPREGSET 2          /* Contains copy of fpregset struct */
 #define NT_PRPSINFO 3          /* Contains copy of prpsinfo struct */
@@ -595,9 +468,5 @@
 #define PF_MASKPROC 0xF0000000           /* Processor-specific reserved bits */
 
 #define CORE_MEM_LINE_MASK 0xFFFFFFC0
-<<<<<<< HEAD
->>>>>>> db6a41e (change)
-=======
->>>>>>> main/main
 
 #endif /* __MCD_ELF_DEFINE_H__ */

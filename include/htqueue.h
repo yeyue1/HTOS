@@ -3,14 +3,7 @@
 
 #include "httypes.h"
 #include "htlist.h"
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
 #include "httask.h"
->>>>>>> db6a41e (change)
-=======
-#include "httask.h"
->>>>>>> main/main
 
 /* 队列指针数据结构 */
 typedef struct htQueuePointers
@@ -25,11 +18,6 @@ typedef struct htSemaphoreData
     UBaseType_t uxSemaphoreCount;  /* 信号量计数值 */
 } htSemaphoreData_t;
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-=======
->>>>>>> main/main
 /* 记录递归互斥量所有者和递归计数的结构 */
 typedef struct htMutexHolder
 {
@@ -39,10 +27,6 @@ typedef struct htMutexHolder
     UBaseType_t uxOriginalPriority;
 } htMutexHolder_t;
 
-<<<<<<< HEAD
->>>>>>> db6a41e (change)
-=======
->>>>>>> main/main
 /* 队列定义结构 */
 typedef struct htQueueDefinition
 {

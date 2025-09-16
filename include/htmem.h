@@ -155,17 +155,8 @@ size_t htGetFreeHeapSize(void);
  */
 size_t htGetMinimumEverFreeHeapSize(void);
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-=======
->>>>>>> main/main
 
 
 static inline int tlsf_block_within_heap(const block_header_t* block);
 
-<<<<<<< HEAD
->>>>>>> db6a41e (change)
-=======
->>>>>>> main/main
 #endif /* HT_MEM_H */

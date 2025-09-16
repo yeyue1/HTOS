@@ -5,20 +5,7 @@
 #include "htscheduler.h"
 #include <stdio.h>
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-/* 记录递归互斥量所有者和递归计数的结构 */
-typedef struct htMutexHolder
-{
-    TaskHandle_t xTaskHandle;
-    UBaseType_t uxRecursiveCallCount;
-} htMutexHolder_t;
-=======
 
->>>>>>> db6a41e (change)
-=======
-
->>>>>>> main/main
 
 /**
  * 创建二值信号量
@@ -226,11 +213,6 @@ BaseType_t htSemaphoreGiveFromISR(SemaphoreHandle_t xSemaphore, BaseType_t *pxHi
 }
 
 /**
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-=======
->>>>>>> main/main
  * 互斥量获取
  */
 
@@ -316,10 +298,6 @@ BaseType_t htSemaphoreTakeMutex(SemaphoreHandle_t xSemaphore, TickType_t xTicksT
 
 
 /**
-<<<<<<< HEAD
->>>>>>> db6a41e (change)
-=======
->>>>>>> main/main
  * 递归互斥量获取
  */
 BaseType_t htSemaphoreTakeRecursive(SemaphoreHandle_t xSemaphore, TickType_t xTicksToWait)
@@ -341,11 +319,6 @@ BaseType_t htSemaphoreTakeRecursive(SemaphoreHandle_t xSemaphore, TickType_t xTi
     /* 检查互斥量是否可用或当前任务是否持有者 */
     if (htQueuePeek(xSemaphore, &xMutexHolder, 0) == htPASS)
     {
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-=======
->>>>>>> main/main
         //如果当前任务优先级高于持有者任务优先级，则优先级继承
         if (xMutexHolder.xTaskHandle != NULL && xMutexHolder.xTaskHandle != pxCurrentTCB)
         {
@@ -362,10 +335,6 @@ BaseType_t htSemaphoreTakeRecursive(SemaphoreHandle_t xSemaphore, TickType_t xTi
                 htListInsertEnd(&(pxReadyTasksLists[xMutexHolder.xTaskHandle->uxPriority]), &(xMutexHolder.xTaskHandle->xStateListItem));
             }
         }
-<<<<<<< HEAD
->>>>>>> db6a41e (change)
-=======
->>>>>>> main/main
         /* 互斥量可用，检查是否已被当前任务持有 */
         if (xMutexHolder.xTaskHandle == NULL || xMutexHolder.xTaskHandle == pxCurrentTCB)
         {
@@ -433,11 +402,6 @@ BaseType_t htSemaphoreTakeRecursive(SemaphoreHandle_t xSemaphore, TickType_t xTi
 #endif
 }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-=======
->>>>>>> main/main
 
 /**
  * 互斥量释放
@@ -484,10 +448,6 @@ BaseType_t htSemaphoreGiveMutex(SemaphoreHandle_t xSemaphore)
 
 
 
-<<<<<<< HEAD
->>>>>>> db6a41e (change)
-=======
->>>>>>> main/main
 /**
  * 递归互斥量释放
  */
@@ -512,11 +472,6 @@ BaseType_t htSemaphoreGiveRecursive(SemaphoreHandle_t xSemaphore)
     {
         if (xMutexHolder.xTaskHandle == pxCurrentTCB)
         {
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-=======
->>>>>>> main/main
             /* 恢复原始优先级（如果有） */
             if (xMutexHolder.uxOriginalPriority != 0)
             {
@@ -527,10 +482,6 @@ BaseType_t htSemaphoreGiveRecursive(SemaphoreHandle_t xSemaphore)
                 
                 xMutexHolder.uxOriginalPriority = 0; //重置原始优先级
             }
-<<<<<<< HEAD
->>>>>>> db6a41e (change)
-=======
->>>>>>> main/main
             /* 当前任务持有互斥量，更新持有者信息 */
             htQueueReceive(xSemaphore, &xMutexHolder, 0);
             

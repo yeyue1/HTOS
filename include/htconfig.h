@@ -7,7 +7,7 @@
 
 /* 系统时钟配置 */
 #define configTICK_RATE_HZ                  1000    /* 系统滴答频率，单位Hz */
-#define configMAX_PRIORITIES                3       /* 最大支持的任务优先级 */
+#define configMAX_PRIORITIES                32       /* 最大支持的任务优先级 */
 #define configMINIMAL_STACK_SIZE            128     /* 最小任务栈大小(字) */
 #define configMAX_TASK_NAME_LEN             16      /* 任务名最大长度 */
 #define configUSE_PREEMPTION                1       /* 使用抢占式调度 */

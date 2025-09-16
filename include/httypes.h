@@ -47,15 +47,7 @@ typedef enum htSchedulerState htSchedulerState_t;
 enum htTaskPriority {
     HT_IDLE_TASK = 0,
     HT_LOW_TASK,
-<<<<<<< HEAD
-<<<<<<< HEAD
-    HT_NORMAL_TASK,  // 修复拼写错误：HHT_NORMAL_TASK -> HT_NORMAL_TASK
-=======
     HT_NORMAL_TASK,  
->>>>>>> db6a41e (change)
-=======
-    HT_NORMAL_TASK,  
->>>>>>> main/main
     HT_HIGH_TASK
 };
 

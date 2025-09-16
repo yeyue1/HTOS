@@ -3,24 +3,8 @@
 
 #include "httypes.h"
 #include "htqueue.h"
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-=======
->>>>>>> main/main
 #include "httask.h"
-/* 记录递归互斥量所有者和递归计数的结构 */
-typedef struct htMutexHolder
-{
-    htTCB_t* xTaskHandle;
-    UBaseType_t uxRecursiveCallCount;
-    //用于优先级继承
-    UBaseType_t uxOriginalPriority;
-} htMutexHolder_t;
-<<<<<<< HEAD
->>>>>>> db6a41e (change)
-=======
->>>>>>> main/main
+
 
 /* 信号量句柄定义 */
 typedef QueueHandle_t SemaphoreHandle_t;
@@ -42,19 +26,10 @@ void htSemaphoreDelete(SemaphoreHandle_t xSemaphore);
 BaseType_t htSemaphoreTake(SemaphoreHandle_t xSemaphore, TickType_t xTicksToWait);
 BaseType_t htSemaphoreTakeFromISR(SemaphoreHandle_t xSemaphore, BaseType_t *pxHigherPriorityTaskWoken);
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-=======
->>>>>>> main/main
 /*互斥量获取*/
 BaseType_t htSemaphoreTakeMutex(SemaphoreHandle_t xSemaphore, TickType_t xTicksToWait);
 
 
-<<<<<<< HEAD
->>>>>>> db6a41e (change)
-=======
->>>>>>> main/main
 /* 递归互斥量获取 */
 BaseType_t htSemaphoreTakeRecursive(SemaphoreHandle_t xSemaphore, TickType_t xTicksToWait);
 
@@ -62,18 +37,9 @@ BaseType_t htSemaphoreTakeRecursive(SemaphoreHandle_t xSemaphore, TickType_t xTi
 BaseType_t htSemaphoreGive(SemaphoreHandle_t xSemaphore);
 BaseType_t htSemaphoreGiveFromISR(SemaphoreHandle_t xSemaphore, BaseType_t *pxHigherPriorityTaskWoken);
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
 /* 互斥量释放 */
 BaseType_t htSemaphoreGiveMutex(SemaphoreHandle_t xSemaphore);
 
->>>>>>> db6a41e (change)
-=======
-/* 互斥量释放 */
-BaseType_t htSemaphoreGiveMutex(SemaphoreHandle_t xSemaphore);
-
->>>>>>> main/main
 /* 递归互斥量释放 */
 BaseType_t htSemaphoreGiveRecursive(SemaphoreHandle_t xSemaphore);
 

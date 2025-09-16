@@ -14,10 +14,7 @@
 #include "mcd_arm_define.h"
 #include "mcd_cfg.h"
 
-<<<<<<< HEAD
-=======
 
->>>>>>> main/main
 /**
  * @brief Function pointer type for coredump data output
  *
@@ -43,51 +40,6 @@ typedef void (*mcd_writeout_func_t)(uint8_t *, int);
  * to supply thread information for multi-threaded coredump generation.
  */
 struct thread_info_ops {
-<<<<<<< HEAD
-	/**
-	 * @brief Get total number of threads in the system
-	 * @param ops Pointer to this operations structure
-	 * @return Total thread count
-	 */
-	int32_t (*get_threads_count)(struct thread_info_ops *);
-
-	/**
-	 * @brief Get current executing thread index
-	 * @param ops Pointer to this operations structure
-	 * @return Current thread index
-	 */
-	int32_t (*get_current_thread_idx)(struct thread_info_ops *);
-
-	/**
-	 * @brief Get register set for a specific thread
-	 * @param ops Pointer to this operations structure
-	 * @param thread_idx Thread index to get registers for
-	 * @param core_regset Pointer to store ARM core registers
-	 * @param fp_regset Pointer to store FPU registers
-	 */
-	void (*get_thread_regset)(
-			struct thread_info_ops *, int32_t, core_regset_type *core_regset, fp_regset_type *fp_regset);
-
-	/**
-	 * @brief Get number of memory areas to dump
-	 * @param ops Pointer to this operations structure
-	 * @return Number of memory areas
-	 */
-	int32_t (*get_memarea_count)(struct thread_info_ops *);
-
-	/**
-	 * @brief Get memory area information
-	 * @param ops Pointer to this operations structure
-	 * @param area_idx Memory area index
-	 * @param addr Pointer to store memory area start address
-	 * @param size Pointer to store memory area size
-	 * @return 0 on success, negative on error
-	 */
-	int32_t (*get_memarea)(struct thread_info_ops *, int32_t, uint32_t *, uint32_t *);
-
-	/** Private data for RTOS-specific implementations */
-	void *priv;
-=======
   /**
    * @brief Get total number of threads in the system
    * @param ops Pointer to this operations structure
@@ -133,7 +85,6 @@ struct thread_info_ops {
 
   /** Private data for RTOS-specific implementations */
   void *priv;
->>>>>>> main/main
 };
 
 /**
@@ -211,17 +162,8 @@ void mcd_multi_dump(void);
  * the ELF format coredump.
  *
  * @param ops Pointer to thread information operations structure.
-<<<<<<< HEAD
-<<<<<<< HEAD
- *            Contains function pointers for retrieving thread and memory information.
-=======
  *            Contains function pointers for retrieving thread and memory
  * information.
->>>>>>> db6a41e (change)
-=======
- *            Contains function pointers for retrieving thread and memory
- * information.
->>>>>>> main/main
  *
  * @note This is a low-level function typically called by mcd_mini_dump()
  *       and mcd_multi_dump() after setting up appropriate ops structure.
@@ -260,17 +202,8 @@ void mcd_mini_dump_ops(struct thread_info_ops *ops);
 /**
  * @brief           Generate coredump and save to specified output.
  *
-<<<<<<< HEAD
-<<<<<<< HEAD
- * @param[in]       output_mode Output mode (MCD_OUTPUT_SERIAL, MCD_OUTPUT_MEMORY, or MCD_OUTPUT_FILESYSTEM).
-=======
  * @param[in]       output_mode Output mode (MCD_OUTPUT_SERIAL,
  * MCD_OUTPUT_MEMORY, or MCD_OUTPUT_FILESYSTEM).
->>>>>>> db6a41e (change)
-=======
- * @param[in]       output_mode Output mode (MCD_OUTPUT_SERIAL,
- * MCD_OUTPUT_MEMORY, or MCD_OUTPUT_FILESYSTEM).
->>>>>>> main/main
  *
  * @return          Whether save operation success.
  * @retval          MCD_OK      success.
@@ -302,17 +235,8 @@ core_regset_type *get_cur_core_regset_address(void);
  * @brief Get address of current floating-point register set
  *
  * This function returns a pointer to the current thread's floating-point
-<<<<<<< HEAD
-<<<<<<< HEAD
- * register set storage area. The register values are captured during fault handling.
-=======
  * register set storage area. The register values are captured during fault
  * handling.
->>>>>>> db6a41e (change)
-=======
- * register set storage area. The register values are captured during fault
- * handling.
->>>>>>> main/main
  *
  * @return Pointer to floating-point register set structure
  *
