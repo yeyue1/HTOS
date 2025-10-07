@@ -153,6 +153,19 @@ BaseType_t htTaskCreate(TaskFunction_t pxTaskCode, const char *const pcName, con
 			/* 初始化列表项 */
 			htListItemInit(&(pxNewTCB->xStateListItem));
 			htListItemInit(&(pxNewTCB->xEventListItem));
+			/* 添加到所有任务列表 */
+			/* 为所有任务列表分配独立的链表项（避免侵入冲突） */
+			htListItem_t *pxAllocItem = (htListItem_t *)htPortMalloc(sizeof(htListItem_t));
+			if (pxAllocItem != NULL) {
+				htListItemInit(pxAllocItem);
+				/* 所有任务列表中保存对 TCB 的所有权，以便信息查询 */
+				htListSetItemOwner(pxAllocItem, pxNewTCB);
+				/* 可选：将值设为优先级或其它标记 */
+				htListSetItemValue(pxAllocItem, configMAX_PRIORITIES - uxPriority);
+				htListInsertEnd(&pxAllocatedTasksList, pxAllocItem);
+			} else {
+				/* 分配失败则忽略，不影响任务创建 */
+			}
 
 			/* 设置列表项的所有者 */
 			htListSetItemOwner(&(pxNewTCB->xStateListItem), pxNewTCB);
@@ -164,8 +177,6 @@ BaseType_t htTaskCreate(TaskFunction_t pxTaskCode, const char *const pcName, con
 			/* 添加到就绪列表 */
 			pxNewTCB->uxTaskState = HT_TASK_READY;
 			htListInsertEnd(&(pxReadyTasksLists[uxPriority]), &(pxNewTCB->xStateListItem));
-			/* 添加到所有任务列表 */
-			htListInsertEnd(&pxAllocatedTasksList, &(pxNewTCB->xStateListItem));
 
 			/* 更新任务计数 */
 			uxCurrentNumberOfTasks++;
