@@ -292,6 +292,37 @@ void mcd_print_memoryinfo(void);
 
 更多细节请查看 Trace/coredump/README.md
 
+# letter shell 3.x（已移植到 HTOS）
+
+本仓库中的 Letter Shell（3.x）已被移植到 HTOS 上，提供一个在 HTOS 上运行的嵌入式交互 shell。该文档说明了在 HTOS 中的集成要点、配置建议和常见注意事项。
+
+## 关键变化（HTOS 移植）
+- 新增移植层：lettershell/src/shell_port.c / shell_port.h，封装串口读写、任务创建与系统信息命令。
+- 在 HTOS 上初始化调用：shellPortInit()（该函数会创建 shell 任务并注册读写回调）。
+- 依赖 HTOS 的符号与 BSP：htOS 计时（xTickCount）、任务创建（htOSTaskCreate）、串口缓冲（aRxBuffer2、RX_len2、huart2）、RS485 宏等需在工程中提供。
+- 导出命令：test、sysinfo、led（已在 shell_port.c 中注册）。
+
+## 快速集成步骤（HTOS / Keil / GCC）
+1. 将文件加入工程
+   - 添加 lettershell/src/*.c、lettershell/src/*.h 到工程编译列表（或 CMake / Keil 项目）。
+   - 确保 include 路径包含 lettershell/src（或对应路径）。
+
+2. 提供或确认以下符号（shell_port.c 依赖）
+   - 串口接收缓冲与长度：extern uint8_t aRxBuffer2[]; extern uint8_t RX_len2;
+   - 串口句柄：extern UART_HandleTypeDef huart2;
+   - HTOS 计时：extern TickType_t xTickCount;
+   - 任务创建接口：htOSTaskCreate(...)
+   - RS485 控制宏（若使用 RS485）或替换为普通串口发送/接收逻辑。
+
+3. （可选）创建并配置 shell_cfg_user.h 覆盖默认配置（见示例），确保 SHELL_USING_CMD_EXPORT = 1 以启用宏式命令导出。
+
+4. 在系统初始化中调用
+```c
+// 在 htOS 初始化之后，任务启动之前
+htOSInit();
+shellPortInit();   // 会创建 shell 任务并打印欢迎信息
+htOSStart();
+
 ## 注意事项
 
 1. **堆栈大小**：确保为任务分配足够的堆栈空间，避免堆栈溢出  
