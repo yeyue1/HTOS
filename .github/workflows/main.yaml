@@ -33,48 +33,31 @@ jobs:
         continue-on-error: true
         run: |
           echo "=== Running clang-tidy analysis ==="
-          
-          # 查找所有C源文件和头文件
           FILES=$(find kernel include -type f \( -name "*.c" -o -name "*.h" \) 2>/dev/null || true)
-          
           if [ -z "$FILES" ]; then
-            echo "Warning: No C source files found in kernel/include directories"
-            echo "Searching in current directory instead..."
             FILES=$(find . -type f \( -name "*.c" -o -name "*.h" \) -not -path "*/\.*" 2>/dev/null || true)
           fi
-          
           if [ -z "$FILES" ]; then
-            echo "Error: No C source files found anywhere"
+            echo "No C files found"
             exit 0
           fi
-          
-          echo "Found files:"
-          echo "$FILES" | head -10
-          echo "..."
-          echo "Total: $(echo "$FILES" | wc -l) files"
-          
-          # 逐文件运行 clang-tidy（避免 xargs 警告），并确保包含目录覆盖项目根与 include/kernel
           echo "$FILES" | while IFS= read -r f; do
             echo "Analyzing: $f"
             clang-tidy "$f" \
               --checks="*,-llvmlibc-*,-altera-*,-fuchsia-*,-android-*,-darwin-*,-zircon-*,-abseil-*,-boost-*,-google-*,-hicpp-*,-modernize-*,-readability-identifier-length,-readability-magic-numbers,-cppcoreguidelines-avoid-magic-numbers,-cert-dcl37-c,-cert-dcl51-cpp,-bugprone-easily-swappable-parameters,-readability-function-cognitive-complexity" \
               --warnings-as-errors="" \
               -- -std=c11 \
-              -I. \
-              -Iinclude \
-              -Ikernel \
-              -I/usr/include \
-              -DSTM32F103xB \
-              -D__GNUC__ \
+              -I. -Iinclude -Ikernel \
+              -DSTM32F103xB -D__GNUC__ \
               -DconfigTICK_RATE_HZ=1000 \
               -DconfigMAX_PRIORITIES=32 \
               -DconfigMINIMAL_STACK_SIZE=128 \
               -DconfigMAX_TASK_NAME_LEN=16 \
               -DconfigTOTAL_HEAP_SIZE=12288 \
               -DconfigUSE_RECURSIVE_MUTEXES=1 \
-              2>&1 || true
+              2>&1 | tee -a clang-tidy.log || true
           done
-          ' || echo "clang-tidy completed with warnings"
+          echo "clang-tidy finished"
 
       - name: Run cppcheck (Secondary Check)
         run: |
