@@ -1,0 +1,2 @@
+Rule 15.5: A function should have a single point of exit at the end
+Rule 17.3: Implicit conversions shall not be performed on function pointers
