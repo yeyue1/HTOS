@@ -324,6 +324,7 @@ static inline block_header_t *tlsf_block_next(const block_header_t *block)
  */
 static inline block_header_t *tlsf_block_link_next(block_header_t *block)
 {
+	// 获取下一个块
 	block_header_t *next = tlsf_block_next(block);
 	/* 仅在 next 在堆内时设置 prev_phys_block，以免写越界 */
 	if (tlsf_block_within_heap(next)) {
@@ -343,6 +344,7 @@ static inline block_header_t *tlsf_block_link_next(block_header_t *block)
  */
 static inline void tlsf_block_mark_as_free(block_header_t *block)
 {
+	// 链接下一个块
 	block_header_t *next = tlsf_block_link_next(block);
 	tlsf_block_set_prev_free(next);
 	tlsf_block_set_free(block);
@@ -363,10 +365,15 @@ static inline void tlsf_block_mark_as_used(block_header_t *block)
 static void tlsf_mapping_insert(size_t size, int *fli, int *sli)
 {
 	int fl, sl;
+	/* 根据块大小计算FL和SL索引 */
+	/* size必须至少为TLSF_SMALL_BLOCK_SIZE */
 	if (size < TLSF_SMALL_BLOCK_SIZE) {
+		/* 对于小块，FL=0，SL按大小线性划分 */
 		fl = 0;
 		sl = tlsf_cast(int, size) / (TLSF_SMALL_BLOCK_SIZE / TLSF_SL_INDEX_COUNT);
 	} else {
+		/* 对于大块，使用对数划分FL，SL按大小线性划分 */
+		/* 计算FL：找到最高有效位位置 */
 		fl = tlsf_fls(size);
 		sl = tlsf_cast(int, size >> (fl - TLSF_SL_INDEX_COUNT_LOG2)) ^ (1 << TLSF_SL_INDEX_COUNT_LOG2);
 		fl -= (TLSF_FL_INDEX_SHIFT - 1);
@@ -385,6 +392,7 @@ static void tlsf_mapping_insert(size_t size, int *fli, int *sli)
 	*sli = sl;
 }
 
+/* 查找合适的FL和SL索引 */
 static void tlsf_mapping_search(size_t size, int *fli, int *sli)
 {
 	if (size >= TLSF_SMALL_BLOCK_SIZE) {
@@ -396,6 +404,7 @@ static void tlsf_mapping_search(size_t size, int *fli, int *sli)
 			size += round;
 		}
 	}
+	/* 重新映射以获取最终的FL和SL */
 	tlsf_mapping_insert(size, fli, sli);
 }
 
@@ -408,8 +417,9 @@ static void tlsf_remove_free_block(tlsf_control_t *control, block_header_t *bloc
 	}
 	block_header_t *prev = block->prev_free;
 	block_header_t *next = block->next_free;
-
+	/* 从链表中移除块 */
 	if (next) {
+		/* 更新下一个块的前向指针 */
 		next->prev_free = prev;
 	}
 	if (prev) {
@@ -430,12 +440,14 @@ static void tlsf_remove_free_block(tlsf_control_t *control, block_header_t *bloc
 	}
 }
 
+/* 插入块到空闲链表 */
 static void tlsf_insert_free_block(tlsf_control_t *control, block_header_t *block, int fl, int sl)
 {
 	/* defensive check: ensure fl/sl in range */
 	if (fl < 0 || fl >= TLSF_FL_INDEX_COUNT || sl < 0 || sl >= TLSF_SL_INDEX_COUNT) {
 		return;
 	}
+
 	block_header_t *current = control->blocks[fl][sl];
 	block->next_free = current;
 	block->prev_free = NULL;
@@ -449,31 +461,83 @@ static void tlsf_insert_free_block(tlsf_control_t *control, block_header_t *bloc
 	control->sl_bitmap[fl] |= (1U << sl);
 }
 
+// static block_header_t *tlsf_search_suitable_block(tlsf_control_t *control, int *fli, int *sli)
+// {
+// 	int fl = *fli;
+// 	int sl = *sli;
+// 	// 查找合适的块
+// 	// 首先在当前FL的SL位图中查找
+// 	unsigned int sl_map = control->sl_bitmap[fl] & (~0U << sl);
+// 	if (!sl_map) {
+// 		// 当前FL没有合适的SL，查找更高的FL
+// 		const unsigned int fl_map = control->fl_bitmap & (~0U << (fl + 1));
+// 		if (!fl_map) {
+// 			return NULL;
+// 		}
+
+// 		fl = tlsf_ffs(fl_map);
+// 		*fli = fl;
+// 		sl_map = control->sl_bitmap[fl];
+// 	}
+// 	sl = tlsf_ffs(sl_map);
+// 	*sli = sl;
+
+// 	return control->blocks[fl][sl];
+// }
+
 static block_header_t *tlsf_search_suitable_block(tlsf_control_t *control, int *fli, int *sli)
 {
 	int fl = *fli;
 	int sl = *sli;
 
+	/* 边界检查 */
+	if (fl < 0 || fl >= TLSF_FL_INDEX_COUNT)
+		return NULL;
+	if (sl < 0)
+		sl = 0;
+	if (sl >= TLSF_SL_INDEX_COUNT)
+		sl = TLSF_SL_INDEX_COUNT - 1;
+
+	/* 先在当前 FL 中查找 SL >= sl 的位 */
 	unsigned int sl_map = control->sl_bitmap[fl] & (~0U << sl);
-	if (!sl_map) {
+
+	/* 如果当前 FL 没有合适的 SL，循环查找更高的 FL（直到找到或没有更高的 FL） */
+	while (!sl_map) {
 		const unsigned int fl_map = control->fl_bitmap & (~0U << (fl + 1));
 		if (!fl_map) {
+			/* 所有更高 FL 都没有空闲链表 */
 			return NULL;
 		}
 
-		fl = tlsf_ffs(fl_map);
-		*fli = fl;
-		sl_map = control->sl_bitmap[fl];
-	}
-	sl = tlsf_ffs(sl_map);
-	*sli = sl;
+		int next_fl = tlsf_ffs(fl_map);
+		if (next_fl < 0 || next_fl >= TLSF_FL_INDEX_COUNT) {
+			return NULL;
+		}
 
-	return control->blocks[fl][sl];
+		fl = next_fl;
+		/* 在新的 FL 从 SL=0 开始查找 */
+		sl_map = control->sl_bitmap[fl];
+		if (!sl_map) {
+			/* 保险起见继续循环（理论上 fl_map 保证该 FL 有非零 sl_bitmap，但加入循环更稳健） */
+			continue;
+		}
+		break;
+	}
+
+	int next_sl = tlsf_ffs(sl_map);
+	if (next_sl < 0 || next_sl >= TLSF_SL_INDEX_COUNT) {
+		return NULL;
+	}
+
+	*fli = fl;
+	*sli = next_sl;
+	return control->blocks[fl][next_sl];
 }
 
-/* 块分割和合并 */
+/* 块分割 */
 static block_header_t *tlsf_block_split(tlsf_control_t *control, block_header_t *block, size_t size)
 {
+	// 计算剩余块的位置
 	block_header_t *remaining = tlsf_offset_to_block(block, size);
 
 	const size_t remain_size = tlsf_block_size(block) - size;
@@ -483,6 +547,7 @@ static block_header_t *tlsf_block_split(tlsf_control_t *control, block_header_t 
 	}
 
 	remaining->size = remain_size;
+	// 设置剩余块为空闲，前块为已用，初始化时主块前无块
 	tlsf_block_set_free(remaining);
 	tlsf_block_set_prev_used(remaining);
 	remaining->prev_phys_block = block;
@@ -493,6 +558,7 @@ static block_header_t *tlsf_block_split(tlsf_control_t *control, block_header_t 
 	return remaining;
 }
 
+// 吸收相邻块
 static block_header_t *tlsf_block_absorb(block_header_t *prev, block_header_t *block)
 {
 	prev->size += tlsf_block_size(block);
@@ -500,19 +566,24 @@ static block_header_t *tlsf_block_absorb(block_header_t *prev, block_header_t *b
 	return prev;
 }
 
+// 合并前一个空闲块
 static block_header_t *tlsf_block_merge_prev(tlsf_control_t *control, block_header_t *block)
 {
 	if (tlsf_block_is_prev_free(block)) {
 		block_header_t *prev = block->prev_phys_block;
 		int fl, sl;
+		// 查找前一个块的位图信息
 		tlsf_mapping_insert(tlsf_block_size(prev), &fl, &sl);
+		// 移除前一个块的空闲链表
 		tlsf_remove_free_block(control, prev, fl, sl);
+		// 吸收前一个块
 		block = tlsf_block_absorb(prev, block);
 	}
 
 	return block;
 }
 
+// 合并后一个空闲块
 static block_header_t *tlsf_block_merge_next(tlsf_control_t *control, block_header_t *block)
 {
 	block_header_t *next = tlsf_block_next(block);
@@ -523,7 +594,9 @@ static block_header_t *tlsf_block_merge_next(tlsf_control_t *control, block_head
 
 	if (tlsf_block_is_free(next)) {
 		int fl, sl;
+		/* 查找后一个块的位图信息 */
 		tlsf_mapping_insert(tlsf_block_size(next), &fl, &sl);
+		/* 移除后一个块的空闲链表 */
 		tlsf_remove_free_block(control, next, fl, sl);
 		block = tlsf_block_absorb(block, next);
 	}
@@ -574,6 +647,7 @@ void htMemInit(void)
 	/* 创建主区域的空闲块（block->size 存储整个块的字节数，包括 header） */
 	block_header_t *block = (block_header_t *)mem_ptr;
 	block->size = initial_block_size & TLSF_SIZE_MASK;
+	// 当前块为空闲，前块为已用，初始化时主块前无块
 	tlsf_block_set_free(block);
 	tlsf_block_set_prev_used(block);
 	block->prev_phys_block = NULL;
@@ -586,6 +660,7 @@ void htMemInit(void)
 		return;
 	}
 	next->size = 0;
+	// 当前块为空闲，前块为已用，初始化时主块前无块
 	tlsf_block_set_used(next);
 	tlsf_block_set_prev_free(next);
 	next->prev_phys_block = block;

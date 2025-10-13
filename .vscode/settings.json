@@ -6,5 +6,6 @@
     "[cpp]": {
         "editor.defaultFormatter": "xaver.clang-format"
     },
-    "clang-format.executable": "E:\\clang+llvm-20.1.2\\bin\\clang-format.exe"
+    "clang-format.executable": "E:\\clang+llvm-20.1.2\\bin\\clang-format.exe",
+    "cmake.sourceDirectory": "C:/Users/yeyue/Desktop/test/ostestdir/HTOS/lettershell/demo/esp-idf"
 }
