@@ -53,14 +53,16 @@ jobs:
           echo "..."
           echo "Total: $(echo "$FILES" | wc -l) files"
           
-          # 运行 clang-tidy
-          echo "$FILES" | xargs -n1 -I{} sh -c '
-            echo "Analyzing: {}"
-            clang-tidy {} \
+          # 逐文件运行 clang-tidy（避免 xargs 警告），并确保包含目录覆盖项目根与 include/kernel
+          echo "$FILES" | while IFS= read -r f; do
+            echo "Analyzing: $f"
+            clang-tidy "$f" \
               --checks="*,-llvmlibc-*,-altera-*,-fuchsia-*,-android-*,-darwin-*,-zircon-*,-abseil-*,-boost-*,-google-*,-hicpp-*,-modernize-*,-readability-identifier-length,-readability-magic-numbers,-cppcoreguidelines-avoid-magic-numbers,-cert-dcl37-c,-cert-dcl51-cpp,-bugprone-easily-swappable-parameters,-readability-function-cognitive-complexity" \
               --warnings-as-errors="" \
               -- -std=c11 \
+              -I. \
               -Iinclude \
+              -Ikernel \
               -I/usr/include \
               -DSTM32F103xB \
               -D__GNUC__ \
@@ -71,6 +73,7 @@ jobs:
               -DconfigTOTAL_HEAP_SIZE=12288 \
               -DconfigUSE_RECURSIVE_MUTEXES=1 \
               2>&1 || true
+          done
           ' || echo "clang-tidy completed with warnings"
 
       - name: Run cppcheck (Secondary Check)
