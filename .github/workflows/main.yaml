@@ -102,6 +102,11 @@ jobs:
             grep "<error" cppcheck-report.xml | head -10 || true
           fi
 
+      - name: Ensure analysis logs exist
+        run: |
+          [ -f clang-tidy.log ] || touch clang-tidy.log
+          [ -f cppcheck-report.xml ] || touch cppcheck-report.xml
+
       - name: Upload analysis reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -109,6 +114,7 @@ jobs:
           name: static-analysis-reports
           path: |
             cppcheck-report.xml
+            clang-tidy.log
 
   unit-test:
     runs-on: ubuntu-latest
