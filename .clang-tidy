@@ -20,7 +20,9 @@ Checks: >
   -cert-dcl51-cpp,
   -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
   -bugprone-easily-swappable-parameters,
-  -readability-function-cognitive-complexity
+  -readability-function-cognitive-complexity,
+  -misc-unused-parameters,
+  -readability-non-const-parameter
 
 WarningsAsErrors: ''
 

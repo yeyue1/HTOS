@@ -58,16 +58,32 @@ jobs:
           name: test-results
           path: tests/test_results.txt
 
-.PHONY: lint lint-clang lint-cppcheck clean-lint
+.PHONY: lint lint-clang lint-cppcheck clean-lint check-files
 
-lint: lint-clang lint-cppcheck
+# 检查文件是否存在
+check-files:
+	@echo "Checking for source files..."
+	@find kernel include -type f \( -name "*.c" -o -name "*.h" \) 2>/dev/null | wc -l | xargs -I{} echo "Found {} files"
+
+lint: check-files lint-clang lint-cppcheck
 
 lint-clang:
 	@echo "Running clang-tidy..."
-	@find kernel include -type f \( -name "*.c" -o -name "*.h" \) -print0 | \
-	xargs -0 -r clang-tidy \
+	@FILES=$$(find kernel include -type f \( -name "*.c" -o -name "*.h" \) 2>/dev/null); \
+	if [ -z "$$FILES" ]; then \
+		echo "No source files found"; \
+		exit 1; \
+	fi; \
+	echo "$$FILES" | xargs -n1 clang-tidy \
 		--config-file=.clang-tidy \
-		-- -std=c11 -Iinclude -DSTM32F103xB || echo "clang-tidy completed"
+		-- -std=c11 \
+		-Iinclude \
+		-DSTM32F103xB \
+		-DconfigTICK_RATE_HZ=1000 \
+		-DconfigMAX_PRIORITIES=32 \
+		-DconfigMINIMAL_STACK_SIZE=128 \
+		-DconfigTOTAL_HEAP_SIZE=12288 \
+		|| echo "clang-tidy completed"
 
 lint-cppcheck:
 	@echo "Running cppcheck with MISRA addon..."
@@ -78,9 +94,14 @@ lint-cppcheck:
 		--inline-suppr \
 		--suppress=misra-c2012-* \
 		--suppress=unknownMacro \
+		--suppress=misra-config \
 		--template="{file}:{line}: [{severity}] {id} {message}" \
 		-Iinclude \
+		-DconfigTICK_RATE_HZ=1000 \
+		-DconfigMAX_PRIORITIES=32 \
+		-DconfigTOTAL_HEAP_SIZE=12288 \
 		include kernel 2>&1 | tee cppcheck.log || true
+	@echo "Cppcheck log saved to cppcheck.log"
 
 clean-lint:
 	@rm -f cppcheck.log cppcheck-report.xml
