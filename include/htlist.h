@@ -1,7 +1,7 @@
 #ifndef HTLIST_H
 #define HTLIST_H
 
-#include "../../include/httypes.h"
+#include "httypes.h"
 
 /* 列表操作函数原型 */
 void htListInit(htList_t *pxList);

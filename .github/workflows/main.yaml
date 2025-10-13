@@ -48,7 +48,7 @@ jobs:
               --warnings-as-errors="" \
               -- -std=c11 \
               -I. -Iinclude -Ikernel \
-              -DSTM32F103xB -D__GNUC__ \
+              -DSTM32F103xB \
               -DconfigTICK_RATE_HZ=1000 \
               -DconfigMAX_PRIORITIES=32 \
               -DconfigMINIMAL_STACK_SIZE=128 \
