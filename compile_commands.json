@@ -1,0 +1,42 @@
+[
+  {
+    "directory": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS",
+    "command": "gcc -std=c11 -Ic:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\include -DSTM32F103xB -c c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htlist.c",
+    "file": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htlist.c"
+  },
+  {
+    "directory": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS",
+    "command": "gcc -std=c11 -Ic:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\include -DSTM32F103xB -c c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htmem.c",
+    "file": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htmem.c"
+  },
+  {
+    "directory": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS",
+    "command": "gcc -std=c11 -Ic:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\include -DSTM32F103xB -c c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htos.c",
+    "file": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htos.c"
+  },
+  {
+    "directory": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS",
+    "command": "gcc -std=c11 -Ic:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\include -DSTM32F103xB -c c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htqueue.c",
+    "file": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htqueue.c"
+  },
+  {
+    "directory": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS",
+    "command": "gcc -std=c11 -Ic:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\include -DSTM32F103xB -c c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htscheduler.c",
+    "file": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htscheduler.c"
+  },
+  {
+    "directory": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS",
+    "command": "gcc -std=c11 -Ic:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\include -DSTM32F103xB -c c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htsemaphore.c",
+    "file": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htsemaphore.c"
+  },
+  {
+    "directory": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS",
+    "command": "gcc -std=c11 -Ic:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\include -DSTM32F103xB -c c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\httask.c",
+    "file": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\httask.c"
+  },
+  {
+    "directory": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS",
+    "command": "gcc -std=c11 -Ic:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\include -DSTM32F103xB -c c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htutils.c",
+    "file": "c:\\Users\\yeyue\\Desktop\\test\\ostestdir\\HTOS\\kernel\\htutils.c"
+  }
+]
