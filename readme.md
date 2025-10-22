@@ -306,7 +306,7 @@ void mcd_print_memoryinfo(void);
 1. 将文件加入工程
    - 添加 lettershell/src/*.c、lettershell/src/*.h 到工程编译列表（或 CMake / Keil 项目）。
    - 确保 include 路径包含 lettershell/src（或对应路径）。
-
+ 
 2. 提供或确认以下符号（shell_port.c 依赖）
    - 串口接收缓冲与长度：extern uint8_t aRxBuffer2[]; extern uint8_t RX_len2;
    - 串口句柄：extern UART_HandleTypeDef huart2;
