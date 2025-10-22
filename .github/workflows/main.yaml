@@ -149,7 +149,7 @@ jobs:
           path: tests/test_results.txt
         continue-on-error: true
 
-          security-scan:
+  security-scan:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -341,3 +341,4 @@ jobs:
             coverage.html
             coverage.xml
         continue-on-error: true
+
