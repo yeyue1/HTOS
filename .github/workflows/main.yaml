@@ -197,7 +197,8 @@ jobs:
       - name: Install analysis tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cloc lizard
+          sudo apt-get install -y cloc python3-pip
+          pip3 install lizard
 
       - name: Count lines of code
         run: |
@@ -300,45 +301,45 @@ jobs:
             iwyu-report.txt
         continue-on-error: true
 
-  code-coverage-analysis:
-    runs-on: ubuntu-latest
-    needs: unit-test
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install coverage tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcovr lcov
-
-      - name: Analyze test coverage
-        run: |
-          echo "=== Code Coverage Analysis ==="
-          if [ -d tests ]; then
-            # 检查是否有覆盖率数据文件
-            if find tests -name "*.gcda" -o -name "*.gcno" | grep -q .; then
-              echo "Found coverage data files"
-              
-              # 生成覆盖率报告
-              gcovr -r . --html --html-details -o coverage.html || true
-              gcovr -r . --xml -o coverage.xml || true
-              gcovr -r . || true
-            else
-              echo "No coverage data found. Tests need to be compiled with --coverage flag"
-              echo "Add to tests/Makefile: CFLAGS += --coverage"
-            fi
-          else
-            echo "No tests directory found"
-          fi
-
-      - name: Upload coverage reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-reports
-          path: |
-            coverage.html
-            coverage.xml
-        continue-on-error: true
+  # code-coverage-analysis:
+  #  runs-on: ubuntu-latest
+  #  needs: unit-test
+  #  steps:
+  #    - name: Checkout
+  #      uses: actions/checkout@v4
+  #
+  #    - name: Install coverage tools
+  #      run: |
+  #        sudo apt-get update
+  #        sudo apt-get install -y gcovr lcov
+  #
+  #    - name: Analyze test coverage
+  #      run: |
+  #        echo "=== Code Coverage Analysis ==="
+  #        if [ -d tests ]; then
+  #          # 检查是否有覆盖率数据文件
+  #          if find tests -name "*.gcda" -o -name "*.gcno" | grep -q .; then
+  #            echo "Found coverage data files"
+  #            
+  #            # 生成覆盖率报告
+  #            gcovr -r . --html --html-details -o coverage.html || true
+  #            gcovr -r . --xml -o coverage.xml || true
+  #            gcovr -r . || true
+  #          else
+  #            echo "No coverage data found. Tests need to be compiled with #--coverage flag"
+  #            echo "Add to tests/Makefile: CFLAGS += --coverage"
+  #          fi
+  #        else
+  #          echo "No tests directory found"
+  #        fi
+  #
+  #    - name: Upload coverage reports
+  #      if: always()
+  #      uses: actions/upload-artifact@v4
+  #      with:
+  #        name: coverage-reports
+  #        path: |
+  #          coverage.html
+  #          coverage.xml
+  #      continue-on-error: true
 
