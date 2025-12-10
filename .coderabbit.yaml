@@ -1,0 +1,31 @@
+language: "zh-CN"
+early_access: false
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  auto_review:
+    enabled: true
+    ignore_title_keywords:
+      - "WIP"
+      - "Draft"
+  tools:
+    ast-grep:
+      enabled: true
+      rule_dirs:
+        - .github/rules # 如果你有自定义规则
+chat:
+  auto_reply: true
+
+instructions: |
+  这是一个嵌入式实时操作系统 (RTOS) 项目，使用 C 语言编写，目标平台是 Cortex-M (STM32)。
+  
+  请重点审查以下内容：
+  1. **内存安全**：检查缓冲区溢出、空指针解引用、未初始化的变量。
+  2. **并发问题**：检查中断处理程序(ISR)中的竞态条件、死锁风险，以及是否在临界区做了耗时操作。
+  3. **资源管理**：确保动态分配的内存（如果使用）被正确释放，检查栈溢出风险。
+  4. **代码规范**：遵循嵌入式 C 的最佳实践，避免使用未定义的行为。
+  5. **可移植性**：指出依赖于特定硬件或编译器的代码，除非是在 `portable/` 或 `arch/` 目录下。
+  
+  请忽略关于 "缺少注释" 的琐碎建议，除非代码逻辑非常晦涩。
+  请使用中文进行回复。
