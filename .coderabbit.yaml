@@ -13,7 +13,7 @@ reviews:
     ast-grep:
       enabled: true
       rule_dirs:
-        - .github/rules # 如果你有自定义规则
+        - .github/rules
 chat:
   auto_reply: true
 
