@@ -1,0 +1,31 @@
+version = 1
+default_profile = "host_tests_ai_guard"
+
+[settings]
+workspace_root = "."
+log_dir = ".codex/build_logs"
+
+[environments.host]
+kind = "custom"
+
+[profiles.host_tests_ai_guard]
+environment = "host"
+platform = "host"
+workdir = "."
+command = ["python", "tests/run_tests.py", "--build"]
+success_regex = "All tests passed"
+artifacts = ["tests/test_results.txt"]
+artifact_policy = "all"
+
+[profiles.host_tests_clang_sanitized]
+environment = "host"
+platform = "linux-clang-sanitized"
+workdir = "."
+command = ["python", "tests/run_tests.py", "--build", "--cc", "clang"]
+success_regex = "All tests passed"
+artifacts = ["tests/test_results.txt"]
+artifact_policy = "all"
+
+[profiles.host_tests_clang_sanitized.env]
+CFLAGS = "-Wall -Wextra -Wpedantic -Werror -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+LDFLAGS = "-fsanitize=address,undefined"

@@ -1,0 +1,20 @@
+[settings]
+repo_root = "."
+default_scope = "changed"
+word_size_bytes = 4
+local_object_warn_bytes = 128
+local_object_fail_bytes = 512
+function_stack_warn_bytes = 256
+function_stack_fail_bytes = 768
+task_stack_warn_pct = 35
+task_stack_fail_pct = 50
+task_stack_guard_bytes = 256
+
+[scan]
+include = ["kernel/*.c", "portable/**/*.c", "include/*.h"]
+exclude = ["lettershell/**", "Trace/**", "tests/**"]
+
+[type_size_hints]
+htListItem_t = 20
+htList_t = 32
+htMutexHolder_t = 12

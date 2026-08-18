@@ -23,6 +23,8 @@ htList_t *htListGetItemContainer(htListItem_t *pxListItem);
 /* 列表查询函数 */
 htListItem_t *htListGetHead(htList_t *pxList);
 htListItem_t *htListGetFirstListItem(htList_t *pxList);
+htListItem_t *htListGetNext(htListItem_t *pxItem);
 UBaseType_t htListGetCurrentNumberOfItems(htList_t *pxList);
+UBaseType_t htListGetLength(htList_t *pxList);
 
 #endif /* HTLIST_H */

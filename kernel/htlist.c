@@ -7,14 +7,16 @@
  */
 void htListInit(htList_t *pxList)
 {
-    /* 链表初始化：设置项目数为0，末尾节点为自身引用 */
-    pxList->uxNumberOfItems = 0;
-    pxList->pxIndex = (htListItem_t *)&(pxList->xListEnd);
-    
-    /* 末尾节点初始化：值设为最大，前后指针指向自己 */
-    pxList->xListEnd.xItemValue = 0xFFFFFFFF;
-    pxList->xListEnd.pxNext = (htListItem_t *)&(pxList->xListEnd);
-    pxList->xListEnd.pxPrevious = (htListItem_t *)&(pxList->xListEnd);
+	/* 链表初始化：设置项目数为0，末尾节点为自身引用 */
+	pxList->uxNumberOfItems = 0;
+	pxList->pxIndex = (htListItem_t *)&(pxList->xListEnd);
+
+	/* 末尾节点初始化：值设为最大，前后指针指向自己 */
+	pxList->xListEnd.xItemValue = 0xFFFFFFFF;
+	pxList->xListEnd.pxNext = (htListItem_t *)&(pxList->xListEnd);
+	pxList->xListEnd.pxPrevious = (htListItem_t *)&(pxList->xListEnd);
+	pxList->xListEnd.pvOwner = NULL;
+	pxList->xListEnd.pxContainer = pxList;
 }
 
 /**
@@ -23,12 +25,12 @@ void htListInit(htList_t *pxList)
  */
 void htListItemInit(htListItem_t *pxItem)
 {
-    /* 链表项初始化：所有字段置为初始状态 */
-    pxItem->xItemValue = 0;
-    pxItem->pxNext = NULL;
-    pxItem->pxPrevious = NULL;
-    pxItem->pvOwner = NULL;
-    pxItem->pxContainer = NULL;  
+	/* 链表项初始化：所有字段置为初始状态 */
+	pxItem->xItemValue = 0;
+	pxItem->pxNext = NULL;
+	pxItem->pxPrevious = NULL;
+	pxItem->pvOwner = NULL;
+	pxItem->pxContainer = NULL;
 }
 
 /**
@@ -38,25 +40,28 @@ void htListItemInit(htListItem_t *pxItem)
  */
 void htListInsert(htList_t *pxList, htListItem_t *pxNewListItem)
 {
-    htListItem_t *pxIterator;
-    
-    /* 查找插入位置：遍历链表直到找到值大于或等于新项目的节点 */
-    for(pxIterator = (htListItem_t *)&(pxList->xListEnd);
-        pxIterator->pxNext->xItemValue <= pxNewListItem->xItemValue;
-        pxIterator = pxIterator->pxNext)
-    {
-        /* 空循环，找到插入点 */
-    }
-    
-    /* 执行插入操作 */
-    pxNewListItem->pxNext = pxIterator->pxNext;
-    pxNewListItem->pxPrevious = pxIterator;
-    pxIterator->pxNext->pxPrevious = pxNewListItem;
-    pxIterator->pxNext = pxNewListItem;
-    
-    /* 更新链表项信息 */
-    pxNewListItem->pxContainer = (void *)pxList;
-    (pxList->uxNumberOfItems)++;
+	htListItem_t *pxIterator;
+
+	/* 最大 tick 值与尾哨兵相同，单独处理以避免在哨兵上永久循环。 */
+	if (pxNewListItem->xItemValue == UINT32_MAX) {
+		pxIterator = pxList->xListEnd.pxPrevious;
+	} else {
+		/* 查找插入位置：遍历链表直到找到值大于新项目的节点。 */
+		for (pxIterator = (htListItem_t *)&(pxList->xListEnd);
+				pxIterator->pxNext->xItemValue <= pxNewListItem->xItemValue; pxIterator = pxIterator->pxNext) {
+			/* 空循环，找到插入点 */
+		}
+	}
+
+	/* 执行插入操作 */
+	pxNewListItem->pxNext = pxIterator->pxNext;
+	pxNewListItem->pxPrevious = pxIterator;
+	pxIterator->pxNext->pxPrevious = pxNewListItem;
+	pxIterator->pxNext = pxNewListItem;
+
+	/* 更新链表项信息 */
+	pxNewListItem->pxContainer = (void *)pxList;
+	(pxList->uxNumberOfItems)++;
 }
 
 /**
@@ -66,17 +71,17 @@ void htListInsert(htList_t *pxList, htListItem_t *pxNewListItem)
  */
 void htListInsertEnd(htList_t *pxList, htListItem_t *pxNewListItem)
 {
-    htListItem_t *pxIndex = pxList->xListEnd.pxPrevious;
-    
-    /* 执行插入操作 */
-    pxNewListItem->pxNext = (htListItem_t *)&(pxList->xListEnd);
-    pxNewListItem->pxPrevious = pxIndex;
-    pxIndex->pxNext = pxNewListItem;
-    pxList->xListEnd.pxPrevious = pxNewListItem;
-    
-    /* 更新链表项信息 */
-    pxNewListItem->pxContainer = (void *)pxList;  
-    (pxList->uxNumberOfItems)++;
+	htListItem_t *pxIndex = pxList->xListEnd.pxPrevious;
+
+	/* 执行插入操作 */
+	pxNewListItem->pxNext = (htListItem_t *)&(pxList->xListEnd);
+	pxNewListItem->pxPrevious = pxIndex;
+	pxIndex->pxNext = pxNewListItem;
+	pxList->xListEnd.pxPrevious = pxNewListItem;
+
+	/* 更新链表项信息 */
+	pxNewListItem->pxContainer = (void *)pxList;
+	(pxList->uxNumberOfItems)++;
 }
 
 /**
@@ -84,25 +89,31 @@ void htListInsertEnd(htList_t *pxList, htListItem_t *pxNewListItem)
  * @param pxItemToRemove 要移除的链表项
  * @return 移除后链表中剩余项目的数量
  */
-UBaseType_t htListRemove(htListItem_t *pxItemToRemove) 
+UBaseType_t htListRemove(htListItem_t *pxItemToRemove)
 {
-    htList_t *pxList = (htList_t *)pxItemToRemove->pxContainer; 
-    
-    /* 调整指针，从链表中移除项目 */
-    pxItemToRemove->pxPrevious->pxNext = pxItemToRemove->pxNext;
-    pxItemToRemove->pxNext->pxPrevious = pxItemToRemove->pxPrevious;
-    
-    /* 如果当前索引指向被移除的项目，更新索引 */
-    if(pxList->pxIndex == pxItemToRemove)
-    {
-        pxList->pxIndex = pxItemToRemove->pxPrevious;
-    }
-    
-    /* 标记项目不再属于任何链表 */
-    pxItemToRemove->pxContainer = NULL;  
-    (pxList->uxNumberOfItems)--;
-    
-    return pxList->uxNumberOfItems;
+	if (pxItemToRemove == NULL || pxItemToRemove->pxContainer == NULL || pxItemToRemove->pxPrevious == NULL ||
+			pxItemToRemove->pxNext == NULL) {
+		return 0U;
+	}
+
+	htList_t *pxList = (htList_t *)pxItemToRemove->pxContainer;
+
+	/* 调整指针，从链表中移除项目 */
+	pxItemToRemove->pxPrevious->pxNext = pxItemToRemove->pxNext;
+	pxItemToRemove->pxNext->pxPrevious = pxItemToRemove->pxPrevious;
+
+	/* 如果当前索引指向被移除的项目，更新索引 */
+	if (pxList->pxIndex == pxItemToRemove) {
+		pxList->pxIndex = pxItemToRemove->pxPrevious;
+	}
+
+	/* 标记项目不再属于任何链表 */
+	pxItemToRemove->pxContainer = NULL;
+	pxItemToRemove->pxNext = NULL;
+	pxItemToRemove->pxPrevious = NULL;
+	(pxList->uxNumberOfItems)--;
+
+	return pxList->uxNumberOfItems;
 }
 
 /**
@@ -112,7 +123,7 @@ UBaseType_t htListRemove(htListItem_t *pxItemToRemove)
  */
 UBaseType_t htListGetLength(htList_t *pxList)
 {
-    return pxList->uxNumberOfItems;
+	return pxList->uxNumberOfItems;
 }
 
 /**
@@ -122,17 +133,16 @@ UBaseType_t htListGetLength(htList_t *pxList)
  */
 htListItem_t *htListGetHead(htList_t *pxList)
 {
-    /* 返回链表的第一个项目 */
-    htListItem_t *pxIndex = (htListItem_t *)&(pxList->xListEnd);
-    
-    /* 如果链表为空，返回NULL */
-    if(pxList->uxNumberOfItems == 0)
-    {
-        return NULL;
-    }
-    
-    /* 返回链表头部项目 */
-    return pxIndex->pxNext;
+	/* 返回链表的第一个项目 */
+	htListItem_t *pxIndex = (htListItem_t *)&(pxList->xListEnd);
+
+	/* 如果链表为空，返回NULL */
+	if (pxList->uxNumberOfItems == 0) {
+		return NULL;
+	}
+
+	/* 返回链表头部项目 */
+	return pxIndex->pxNext;
 }
 
 /**
@@ -142,7 +152,7 @@ htListItem_t *htListGetHead(htList_t *pxList)
  */
 htListItem_t *htListGetNext(htListItem_t *pxItem)
 {
-    return pxItem->pxNext;
+	return pxItem->pxNext;
 }
 
 /**
@@ -152,7 +162,7 @@ htListItem_t *htListGetNext(htListItem_t *pxItem)
  */
 void htListSetItemOwner(htListItem_t *pxItem, void *pvOwner)
 {
-    pxItem->pvOwner = pvOwner;
+	pxItem->pvOwner = pvOwner;
 }
 
 /**
@@ -162,7 +172,7 @@ void htListSetItemOwner(htListItem_t *pxItem, void *pvOwner)
  */
 void *htListGetItemOwner(htListItem_t *pxItem)
 {
-    return pxItem->pvOwner;
+	return pxItem->pvOwner;
 }
 
 /**
@@ -172,7 +182,7 @@ void *htListGetItemOwner(htListItem_t *pxItem)
  */
 void htListSetItemValue(htListItem_t *pxItem, TickType_t xValue)
 {
-    pxItem->xItemValue = xValue;
+	pxItem->xItemValue = xValue;
 }
 
 /**
@@ -182,7 +192,7 @@ void htListSetItemValue(htListItem_t *pxItem, TickType_t xValue)
  */
 TickType_t htListGetItemValue(htListItem_t *pxItem)
 {
-    return pxItem->xItemValue;
+	return pxItem->xItemValue;
 }
 
 /**
@@ -192,7 +202,7 @@ TickType_t htListGetItemValue(htListItem_t *pxItem)
  */
 htListItem_t *htListGetFirstListItem(htList_t *pxList)
 {
-    return htListGetHead(pxList);
+	return htListGetHead(pxList);
 }
 
 /**
@@ -202,7 +212,7 @@ htListItem_t *htListGetFirstListItem(htList_t *pxList)
  */
 UBaseType_t htListGetCurrentNumberOfItems(htList_t *pxList)
 {
-    return pxList->uxNumberOfItems;
+	return pxList->uxNumberOfItems;
 }
 
 /**
@@ -212,8 +222,8 @@ UBaseType_t htListGetCurrentNumberOfItems(htList_t *pxList)
  */
 void htListSetItemContainer(htListItem_t *pxListItem, htList_t *pxList)
 {
-    /* 将列表项的容器指针指向指定列表 */
-    pxListItem->pxContainer = (void *)pxList;
+	/* 将列表项的容器指针指向指定列表 */
+	pxListItem->pxContainer = (void *)pxList;
 }
 
 /**
@@ -223,5 +233,5 @@ void htListSetItemContainer(htListItem_t *pxListItem, htList_t *pxList)
  */
 htList_t *htListGetItemContainer(htListItem_t *pxListItem)
 {
-    return (htList_t *)pxListItem->pxContainer;
+	return (htList_t *)pxListItem->pxContainer;
 }

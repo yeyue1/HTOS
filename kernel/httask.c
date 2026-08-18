@@ -21,6 +21,8 @@ htList_t *pxDelayedTaskList;
 htList_t *pxOverflowDelayedTaskList;
 /* 挂起任务列表 */
 static htList_t xSuspendedTaskList;
+/* 自删除任务必须由空闲任务在完成上下文切换后释放。 */
+static htList_t xTasksWaitingTermination;
 // 所有任务列表
 htList_t pxAllocatedTasksList;
 
@@ -52,6 +54,7 @@ void prvInitialiseTaskLists(void)
 
 	/* 初始化挂起任务列表 */
 	htListInit(&xSuspendedTaskList);
+	htListInit(&xTasksWaitingTermination);
 
 	/* 初始化所有任务列表 */
 	htListInit(&pxAllocatedTasksList);
@@ -89,8 +92,8 @@ static StackType_t *prvInitialiseTaskStack(StackType_t *pxTopOfStack, TaskFuncti
 	*(--pxTopOfStack) = 0; /* R4 */
 
 	// 打印任务栈配置信息 (使用英文避免编码问题)
-	printf("Task stack setup: PC=0x%08lx (with Thumb bit), Param=0x%08lx, SP=%p\r\n", ((uint32_t)pxCode) | 1UL,
-			(uint32_t)pvParameters, pxTopOfStack);
+	printf("Task stack setup: PC=0x%08lx (with Thumb bit), Param=0x%08lx, SP=%p\r\n",
+			(unsigned long)(((uintptr_t)pxCode) | 1UL), (unsigned long)(uintptr_t)pvParameters, (void *)pxTopOfStack);
 
 	return pxTopOfStack;
 }
@@ -104,6 +107,9 @@ BaseType_t htTaskCreate(TaskFunction_t pxTaskCode, const char *const pcName, con
 	htTCB_t *pxNewTCB;
 	StackType_t *pxStack;
 	BaseType_t xReturn = htPASS;
+	if (pxTaskCode == NULL || pcName == NULL) {
+		return htFAIL;
+	}
 
 	/* 检查优先级范围 */
 	if (uxPriority >= configMAX_PRIORITIES) {
@@ -134,9 +140,13 @@ BaseType_t htTaskCreate(TaskFunction_t pxTaskCode, const char *const pcName, con
 			pxNewTCB->pxStack = pxStack;
 			pxNewTCB->uxStackDepth = usActualStackDepth;
 
-			/* 复制任务名称 */
-			strncpy(pxNewTCB->pcTaskName, pcName, configMAX_TASK_NAME_LEN - 1);
-			pxNewTCB->pcTaskName[configMAX_TASK_NAME_LEN - 1] = '\0';
+			/* 复制任务名称，避免依赖平台特定的安全字符串扩展。 */
+			size_t xNameLength = 0U;
+			while (xNameLength < (configMAX_TASK_NAME_LEN - 1U) && pcName[xNameLength] != '\0') {
+				xNameLength++;
+			}
+			memcpy(pxNewTCB->pcTaskName, pcName, xNameLength);
+			pxNewTCB->pcTaskName[xNameLength] = '\0';
 
 			/* 使用安全的栈初始化函数 */
 			pxNewTCB->pxTopOfStack =
@@ -153,19 +163,10 @@ BaseType_t htTaskCreate(TaskFunction_t pxTaskCode, const char *const pcName, con
 			/* 初始化列表项 */
 			htListItemInit(&(pxNewTCB->xStateListItem));
 			htListItemInit(&(pxNewTCB->xEventListItem));
-			/* 添加到所有任务列表 */
-			/* 为所有任务列表分配独立的链表项（避免侵入冲突） */
-			htListItem_t *pxAllocItem = (htListItem_t *)htPortMalloc(sizeof(htListItem_t));
-			if (pxAllocItem != NULL) {
-				htListItemInit(pxAllocItem);
-				/* 所有任务列表中保存对 TCB 的所有权，以便信息查询 */
-				htListSetItemOwner(pxAllocItem, pxNewTCB);
-				/* 可选：将值设为优先级或其它标记 */
-				htListSetItemValue(pxAllocItem, configMAX_PRIORITIES - uxPriority);
-				htListInsertEnd(&pxAllocatedTasksList, pxAllocItem);
-			} else {
-				/* 分配失败则忽略，不影响任务创建 */
-			}
+			htListItemInit(&(pxNewTCB->xAllListItem));
+			htListSetItemOwner(&(pxNewTCB->xAllListItem), pxNewTCB);
+			htListSetItemValue(&(pxNewTCB->xAllListItem), configMAX_PRIORITIES - uxPriority);
+			htListInsertEnd(&pxAllocatedTasksList, &(pxNewTCB->xAllListItem));
 
 			/* 设置列表项的所有者 */
 			htListSetItemOwner(&(pxNewTCB->xStateListItem), pxNewTCB);
@@ -214,6 +215,27 @@ void htIncrementTick(void)
 /**
  * 空闲任务函数 - 当没有其他任务准备运行时，运行此任务
  */
+static void prvDeleteTerminatedTasks(void)
+{
+	for (;;) {
+		htEnterCritical();
+		htListItem_t *pxItem = htListGetHead(&xTasksWaitingTermination);
+		if (pxItem == NULL) {
+			htExitCritical();
+			return;
+		}
+
+		htTCB_t *pxTCB = (htTCB_t *)htListGetItemOwner(pxItem);
+		htListRemove(pxItem);
+		htExitCritical();
+
+		if (pxTCB != NULL) {
+			htPortFree(pxTCB->pxStack);
+			htPortFree(pxTCB);
+		}
+	}
+}
+
 static void htprvIdleTask(void *pvParameters)
 {
 	/* 防止编译器警告 */
@@ -221,6 +243,7 @@ static void htprvIdleTask(void *pvParameters)
 
 	/* 空闲任务永远运行 */
 	for (;;) {
+		prvDeleteTerminatedTasks();
 
 		/* 执行低功耗管理，可选择进入睡眠模式 */
 #if configUSE_IDLE_HOOK
@@ -333,16 +356,16 @@ htList_t htTaskGetAllTaskInfo(void)
  */
 void htTaskCheckDelayedTasks(void)
 {
-	// 确保列表有效
-	if (pxDelayedTaskList == NULL && pxOverflowDelayedTaskList == NULL) {
+	// 确保当前延时列表有效
+	if (pxDelayedTaskList == NULL) {
 		return;
 	}
 
 	// 获取当前滴答计数
 	TickType_t xCurrentTickCount = xTickCount;
 
-	// 如果列表为空，直接返回
-	if (pxDelayedTaskList->uxNumberOfItems == 0 && pxOverflowDelayedTaskList->uxNumberOfItems == 0) {
+	// 溢出列表要等 tick 回绕交换后才能检查，否则会被提前唤醒。
+	if (pxDelayedTaskList->uxNumberOfItems == 0) {
 		return;
 	}
 	// 处理延时到期的任务 - 采用循环检查所有到期任务
@@ -372,48 +395,8 @@ void htTaskCheckDelayedTasks(void)
 			if (pxTCB != NULL) {
 				// 从延时列表移除任务
 				htListRemove(pxItem);
-				xListItemRemoved = htTRUE;
-
-				// 将任务添加回就绪列表
-				if (pxTCB->uxPriority < configMAX_PRIORITIES) {
-					// 更新任务状态
-					pxTCB->uxTaskState = HT_TASK_READY;
-
-					// 设置就绪列表为容器并添加到列表
-					pxItem->pxContainer = &(pxReadyTasksLists[pxTCB->uxPriority]);
-					htListInsertEnd(&(pxReadyTasksLists[pxTCB->uxPriority]), pxItem);
-				}
-			} else {
-				// 无效任务，移除并继续
-				htListRemove(pxItem);
-				xListItemRemoved = htTRUE;
-			}
-		}
-
-		// 如果从列表中移除了项目，重新检查，因为可能有多个项目到期
-	} while (xListItemRemoved == htTRUE);
-	xListItemRemoved = htFALSE; // 标记是否从列表中移除了项目
-
-	do {
-		xListItemRemoved = htFALSE;
-
-		// 获取延时列表中的第一个项目
-		pxItem = htListGetHead(pxOverflowDelayedTaskList);
-		if (pxItem == NULL) {
-			// 列表为空，退出循环
-			break;
-		}
-
-		// 获取此任务的唤醒时间
-		xItemValue = htListGetItemValue(pxItem);
-
-		// 如果到达或超过唤醒时间
-		if (xItemValue <= xCurrentTickCount) {
-			// 获取任务控制块
-			pxTCB = (htTCB_t *)htListGetItemOwner(pxItem);
-			if (pxTCB != NULL) {
-				// 从延时列表移除任务
-				htListRemove(pxItem);
+				// 超时唤醒时也必须从队列/信号量等待列表中摘除。
+				htListRemove(&(pxTCB->xEventListItem));
 				xListItemRemoved = htTRUE;
 
 				// 将任务添加回就绪列表
@@ -446,6 +429,12 @@ void htTaskTickInc(void)
 
 	// 递增系统滴答计数
 	xTickCount++;
+	if (xTickCount == 0U) {
+		// tick 回绕后，之前跨越回绕点的任务成为当前延时任务。
+		htList_t *pxTemporary = pxDelayedTaskList;
+		pxDelayedTaskList = pxOverflowDelayedTaskList;
+		pxOverflowDelayedTaskList = pxTemporary;
+	}
 
 	// 检查延时任务
 	htTaskCheckDelayedTasks();
@@ -467,6 +456,7 @@ void htTaskTickInc(void)
 void htTaskDelete(TaskHandle_t xTaskToDelete)
 {
 	htTCB_t *pxTCB;
+	BaseType_t xDeleteCurrentTask;
 
 	/* 如果参数为NULL，则删除当前任务 */
 	if (xTaskToDelete == NULL) {
@@ -474,33 +464,42 @@ void htTaskDelete(TaskHandle_t xTaskToDelete)
 	} else {
 		pxTCB = (htTCB_t *)xTaskToDelete;
 	}
+	if (pxTCB == NULL) {
+		return;
+	}
+	xDeleteCurrentTask = (pxTCB == pxCurrentTCB) ? htTRUE : htFALSE;
 
 	/* 先禁用中断 */
 	htEnterCritical();
 
-	/* 从任何列表中移除任务 */
+	/* 从状态、事件和全局跟踪列表中移除任务。 */
 	htListRemove(&(pxTCB->xStateListItem));
 	htListRemove(&(pxTCB->xEventListItem));
-	/* 从所有任务列表中移除 */
-	htListRemove(&(pxTCB->xStateListItem));
-	htListRemove(&(pxTCB->xEventListItem));
+	htListRemove(&(pxTCB->xAllListItem));
+
+	if (xDeleteCurrentTask == htTRUE) {
+		pxTCB->uxTaskState = HT_TASK_SUSPENDED;
+		htListSetItemValue(&(pxTCB->xStateListItem), 0U);
+		htListInsertEnd(&xTasksWaitingTermination, &(pxTCB->xStateListItem));
+	}
 
 	/* 递减任务计数器 */
-	uxCurrentNumberOfTasks--;
+	if (uxCurrentNumberOfTasks > 0U) {
+		uxCurrentNumberOfTasks--;
+	}
 
 	/* 恢复中断 */
 	htExitCritical();
 
 	/* 如果删除的是当前任务，需要调度另一个任务 */
-	if (pxTCB == pxCurrentTCB) {
+	if (xDeleteCurrentTask == htTRUE) {
 		/* 强制任务切换 */
 		htTaskYield();
+		return;
 	}
 
-	/* 释放任务栈和TCB内存 */
-	if (pxTCB->pxStack != NULL) {
-		htPortFree(pxTCB->pxStack);
-	}
+	/* 非当前任务已不再执行，可以立即释放。 */
+	htPortFree(pxTCB->pxStack);
 	htPortFree(pxTCB);
 }
 

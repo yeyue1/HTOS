@@ -17,9 +17,13 @@
  * @date 2025
  */
 #include <string.h>
-#include <stdio.h>
 #include "htmem.h"
 #include "htconfig.h"
+#include "htscheduler.h"
+
+#if configTOTAL_HEAP_SIZE > (1U << TLSF_FL_INDEX_MAX)
+#error "TLSF_FL_INDEX_MAX does not cover configTOTAL_HEAP_SIZE"
+#endif
 
 /**
  * TLSF算法辅助宏定义
@@ -28,6 +32,8 @@
 #define tlsf_cast(t, exp) ((t)(exp)) /* 安全类型转换 */
 #define tlsf_min(a, b) ((a) < (b) ? (a) : (b)) /* 取最小值 */
 #define tlsf_max(a, b) ((a) > (b) ? (a) : (b)) /* 取最大值 */
+
+static inline int tlsf_block_within_heap(const block_header_t *block);
 
 /**
  * 位操作辅助函数 - ARM Cortex-M兼容版本
@@ -70,7 +76,6 @@ static inline int tlsf_fls(unsigned int word)
 		bit -= 2;
 	} /* 高2位为0，查找低2位 */
 	if (!(word & 0x80000000)) {
-		word <<= 1;
 		bit -= 1;
 	} /* 最高位为0，查找次高位 */
 
@@ -109,7 +114,6 @@ static inline int tlsf_ffs(unsigned int word)
 		bit += 2;
 	} /* 低2位为0，查找高2位 */
 	if (!(word & 0x00000001)) {
-		word >>= 1;
 		bit += 1;
 	} /* 最低位为0，查找次低位 */
 
@@ -135,19 +139,6 @@ static inline int tlsf_ffs(unsigned int word)
 static inline size_t tlsf_align_up(size_t size, size_t align)
 {
 	return (size + (align - 1)) & ~(align - 1);
-}
-
-/**
- * @brief 向下对齐到指定边界
- * @param size 要对齐的大小
- * @param align 对齐边界（必须是2的幂）
- * @return 对齐后的大小
- *
- * 算法：直接清除低位
- */
-static inline size_t tlsf_align_down(size_t size, size_t align)
-{
-	return size - (size & (align - 1));
 }
 
 /**
@@ -185,18 +176,6 @@ static inline void tlsf_block_set_size(block_header_t *block, size_t size)
 	const size_t oldsize = block->size;
 	/* 保留原有状态位，更新大小部分 */
 	block->size = size | (oldsize & (TLSF_BLOCK_CURR_FREE | TLSF_BLOCK_PREV_FREE));
-}
-
-/**
- * @brief 检查是否为结束标志块
- * @param block 内存块指针
- * @return 1表示是结束块，0表示普通块
- *
- * 结束块大小为0，用于标记堆的结束边界
- */
-static inline int tlsf_block_is_last(const block_header_t *block)
-{
-	return tlsf_block_size(block) == 0;
 }
 
 /**
@@ -375,7 +354,8 @@ static void tlsf_mapping_insert(size_t size, int *fli, int *sli)
 		/* 对于大块，使用对数划分FL，SL按大小线性划分 */
 		/* 计算FL：找到最高有效位位置 */
 		fl = tlsf_fls(size);
-		sl = tlsf_cast(int, size >> (fl - TLSF_SL_INDEX_COUNT_LOG2)) ^ (1 << TLSF_SL_INDEX_COUNT_LOG2);
+		const int shift = fl - TLSF_SL_INDEX_COUNT_LOG2;
+		sl = shift >= 0 ? tlsf_cast(int, size >> shift) ^ (1 << TLSF_SL_INDEX_COUNT_LOG2) : 0;
 		fl -= (TLSF_FL_INDEX_SHIFT - 1);
 	}
 	/* Clamp indices to valid ranges to avoid OOB access */
@@ -535,7 +515,7 @@ static block_header_t *tlsf_search_suitable_block(tlsf_control_t *control, int *
 }
 
 /* 块分割 */
-static block_header_t *tlsf_block_split(tlsf_control_t *control, block_header_t *block, size_t size)
+static block_header_t *tlsf_block_split(block_header_t *block, size_t size)
 {
 	// 计算剩余块的位置
 	block_header_t *remaining = tlsf_offset_to_block(block, size);
@@ -605,7 +585,7 @@ static block_header_t *tlsf_block_merge_next(tlsf_control_t *control, block_head
 }
 
 /* 全局变量 */
-static uint8_t g_tlsf_heap[configTOTAL_HEAP_SIZE];
+static _Alignas(TLSF_ALIGN_SIZE) uint8_t g_tlsf_heap[configTOTAL_HEAP_SIZE];
 static tlsf_control_t g_tlsf_control;
 static int g_tlsf_initialized = 0;
 
@@ -685,12 +665,19 @@ void *htPortMalloc(size_t size)
 		htMemInit();
 	}
 
+	if (!g_tlsf_initialized || size == 0U || size > SIZE_MAX - (TLSF_ALIGN_SIZE - 1U)) {
+		return NULL;
+	}
+
 	const size_t adjust = tlsf_align_up(size, TLSF_ALIGN_SIZE);
-	const size_t block_size = adjust ? tlsf_align_up(adjust + TLSF_BLOCK_HEADER_SIZE, TLSF_ALIGN_SIZE) : 0;
+	if (adjust > SIZE_MAX - TLSF_BLOCK_HEADER_SIZE) {
+		return NULL;
+	}
+	const size_t block_size = tlsf_align_up(adjust + TLSF_BLOCK_HEADER_SIZE, TLSF_ALIGN_SIZE);
 
-	__disable_irq();
+	htEnterCritical();
 
-	if (adjust && block_size) {
+	if (block_size <= g_tlsf_control.free_size) {
 		int fl, sl;
 		tlsf_mapping_search(block_size, &fl, &sl);
 
@@ -700,12 +687,11 @@ void *htPortMalloc(size_t size)
 			tlsf_remove_free_block(&g_tlsf_control, block, fl, sl);
 
 			/* 先从 free_size 减去整个块 */
-			size_t old_free = g_tlsf_control.free_size;
 			g_tlsf_control.free_size -= block_size_real;
 
 			/* 如果块太大，进行分割 */
 			if (block_size_real >= block_size + TLSF_BLOCK_HEADER_SIZE + TLSF_ALIGN_SIZE) {
-				block_header_t *remaining = tlsf_block_split(&g_tlsf_control, block, block_size);
+				block_header_t *remaining = tlsf_block_split(block, block_size);
 				/* 剩余块加回 free_size */
 				size_t remaining_size = tlsf_block_size(remaining);
 				g_tlsf_control.free_size += remaining_size;
@@ -719,12 +705,12 @@ void *htPortMalloc(size_t size)
 				g_tlsf_control.min_free_size = g_tlsf_control.free_size;
 			}
 
-			__enable_irq();
+			htExitCritical();
 			return tlsf_block_to_ptr(block);
 		}
 	}
 
-	__enable_irq();
+	htExitCritical();
 	return NULL;
 }
 
@@ -735,34 +721,35 @@ void htPortFree(void *ptr)
 		return;
 	}
 
-	__disable_irq();
+	if (!g_tlsf_initialized || ((uintptr_t)ptr & (TLSF_ALIGN_SIZE - 1U)) != 0U) {
+		return;
+	}
+
+	htEnterCritical();
 
 	block_header_t *block = tlsf_block_from_ptr(ptr);
 
 	/* 验证指针有效性 */
 	if ((char *)block < (char *)g_tlsf_heap || (char *)block >= (char *)g_tlsf_heap + configTOTAL_HEAP_SIZE) {
-		__enable_irq();
+		htExitCritical();
+		return;
+	}
+	const size_t original_size = tlsf_block_size(block);
+	if (tlsf_block_is_free(block) || original_size < TLSF_BLOCK_HEADER_SIZE ||
+			(original_size & (TLSF_ALIGN_SIZE - 1U)) != 0U ||
+			(char *)block + original_size > (char *)g_tlsf_heap + configTOTAL_HEAP_SIZE) {
+		htExitCritical();
 		return;
 	}
 
 	/* 记录原始块大小（释放前的已分配块大小） */
-	const size_t original_size = tlsf_block_size(block);
-	size_t old_free = g_tlsf_control.free_size;
 
 	/* 标记当前块为空闲 */
 	tlsf_block_mark_as_free(block);
 
 	/* 执行合并（合并只是物理上重组，不改变总空闲量） */
-	int merged_prev = 0, merged_next = 0;
-	if (tlsf_block_is_prev_free(block) && block->prev_phys_block) {
-		merged_prev = 1;
-	}
 	block = tlsf_block_merge_prev(&g_tlsf_control, block);
 
-	block_header_t *next = tlsf_block_next(block);
-	if (tlsf_block_within_heap(next) && tlsf_block_is_free(next)) {
-		merged_next = 1;
-	}
 	block = tlsf_block_merge_next(&g_tlsf_control, block);
 
 	/* 插入到空闲链表 */
@@ -775,18 +762,26 @@ void htPortFree(void *ptr)
 	/* 因为邻居空闲块本来就在 free_size 中，合并不改变总空闲量 */
 	g_tlsf_control.free_size += original_size;
 
-	__enable_irq();
+	htExitCritical();
 }
 /* 获取当前可用堆大小 */
 size_t htGetFreeHeapSize(void)
 {
-	return g_tlsf_control.free_size;
+	size_t free_size;
+	htEnterCritical();
+	free_size = g_tlsf_control.free_size;
+	htExitCritical();
+	return free_size;
 }
 
 /* 获取历史记录的最小可用堆大小 */
 size_t htGetMinimumEverFreeHeapSize(void)
 {
-	return g_tlsf_control.min_free_size;
+	size_t min_free_size;
+	htEnterCritical();
+	min_free_size = g_tlsf_control.min_free_size;
+	htExitCritical();
+	return min_free_size;
 }
 
 /* 获取总堆大小 */

@@ -3,7 +3,6 @@
 #include "httask.h"
 #include "htmem.h"
 #include "htscheduler.h"
-#include <stdio.h>
 
 
 
@@ -218,79 +217,7 @@ BaseType_t htSemaphoreGiveFromISR(SemaphoreHandle_t xSemaphore, BaseType_t *pxHi
 
 BaseType_t htSemaphoreTakeMutex(SemaphoreHandle_t xSemaphore, TickType_t xTicksToWait)
 {
-    BaseType_t xReturn;
-    uint8_t ucBuffer[4]; /* 临时缓冲区，实际不使用 */
-    //检查参数有效性
-    if (xSemaphore == NULL)
-    {
-        return htFAIL;
-    }
-    /* 禁用中断 */
-    htEnterCritical();
-    /* 互斥量不可用，且当前任务不是持有者，则需要等待 */
-    htMutexHolder_t xMutexHolder;
-    if (htQueuePeek(xSemaphore, &xMutexHolder, 0) == htPASS)
-    {
-        if (xMutexHolder.xTaskHandle != NULL && xMutexHolder.xTaskHandle != pxCurrentTCB)
-        {
-            //优先级继承
-            if (xMutexHolder.xTaskHandle != NULL && xMutexHolder.xTaskHandle != pxCurrentTCB)
-            {
-                if (pxCurrentTCB->uxPriority > xMutexHolder.xTaskHandle->uxPriority)
-                {
-                    //记录原始优先级
-                    if (xMutexHolder.uxOriginalPriority == 0)
-                    {
-                        xMutexHolder.uxOriginalPriority = xMutexHolder.xTaskHandle->uxPriority;
-                    }
-                    xMutexHolder.xTaskHandle->uxPriority = pxCurrentTCB->uxPriority;
-                    //重新排序就绪列表
-                    htListRemove(&(xMutexHolder.xTaskHandle->xStateListItem));
-                    htListInsertEnd(&(pxReadyTasksLists[xMutexHolder.xTaskHandle->uxPriority]), &(xMutexHolder.xTaskHandle->xStateListItem));
-                }
-            }
-            /* 互斥量被其他任务持有，需要等待 */
-            if (xTicksToWait > 0)
-            {
-                /* 从就绪列表中移除当前任务 */
-                htListRemove(&(pxCurrentTCB->xStateListItem));
-                
-                /* 设置唤醒时间 */
-                TickType_t xTimeToWake = 0;
-                if (xTicksToWait != 0xFFFFFFFF) /* 0xFFFFFFFF表示永久等待 */
-                {
-                    xTimeToWake = xTickCount + xTicksToWait;
-                    htListSetItemValue(&(pxCurrentTCB->xEventListItem), xTimeToWake);
-                }
-                
-                /* 添加到接收等待队列 */
-                htListInsertEnd(&(((htQUEUE_t *)xSemaphore)->xTasksWaitingToReceive), &(pxCurrentTCB->xEventListItem));
-                
-                /* 标记任务为阻塞状态 */
-                pxCurrentTCB->uxTaskState = HT_TASK_BLOCKED;
-                
-                /* 退出临界区并进行任务切换 */
-                htExitCritical();
-                htTaskYield();
-                
-                /* 任务被唤醒后继续执行，再次尝试获取 */
-                return htSemaphoreTakeMutex(xSemaphore, 0);
-            }
-            else
-            {
-                /* 不等待，直接失败 */
-                htExitCritical();
-                return htFAIL;
-            }
-        }
-    }
-    /* 使用队列接收实现互斥量获取 */
-    xReturn = htQueueReceive(xSemaphore, ucBuffer, xTicksToWait);
-
-    /* 释放中断 */
-    htExitCritical();
-
-    return xReturn;
+	return htSemaphoreTake(xSemaphore, xTicksToWait);
 }
 
 
@@ -409,41 +336,7 @@ BaseType_t htSemaphoreTakeRecursive(SemaphoreHandle_t xSemaphore, TickType_t xTi
 
 BaseType_t htSemaphoreGiveMutex(SemaphoreHandle_t xSemaphore)
 {
-    BaseType_t xReturn;
-    uint8_t ucDummy = 0; /* 占位数据，实际内容无关紧要 */
-    //检查参数有效性
-    if (xSemaphore == NULL)
-    {
-        return htFAIL;
-    }
-    /* 禁用中断 */
-    htEnterCritical();
-    /* 恢复原始优先级（如果有） */
-    htMutexHolder_t xMutexHolder;
-    if (htQueuePeek(xSemaphore, &xMutexHolder, 0) == htPASS)
-    {
-        if (xMutexHolder.xTaskHandle == pxCurrentTCB)
-        {
-            if (xMutexHolder.uxOriginalPriority != 0)
-            {
-                xMutexHolder.xTaskHandle->uxPriority = xMutexHolder.uxOriginalPriority;
-                //重新排序就绪列表
-                htListRemove(&(xMutexHolder.xTaskHandle->xStateListItem));
-                htListInsertEnd(&(pxReadyTasksLists[xMutexHolder.xTaskHandle->uxPriority]), &(xMutexHolder.xTaskHandle->xStateListItem));
-                
-                xMutexHolder.uxOriginalPriority = 0; //重置原始优先级
-            }
-        }
-    }
-   
-
-    /* 使用队列发送实现互斥量释放 */
-    xReturn = htQueueSend(xSemaphore, &ucDummy, 0);
-    
-    /* 释放中断 */
-    htExitCritical();
-    
-    return xReturn;
+	return htSemaphoreGive(xSemaphore);
 }
 
 

@@ -1,6 +1,5 @@
 #include "htscheduler.h"
 #include "httask.h"
-#include "htport.h"
 #include "htlist.h"
 #include "stm32f1xx_hal.h"
 #include <stddef.h> // 提供NULL定义
@@ -9,7 +8,6 @@
 
 /* 外部函数声明 */
 extern void prvInitialiseTaskLists(void);
-extern void htIncrementTick(void);
 extern void htTaskYield(void);
 
 /* 外部变量声明 */
@@ -27,7 +25,7 @@ static UBaseType_t uxSchedulerSuspended = 0; /* 调度器挂起计数 */
 static BaseType_t xYieldPending = htFALSE; /* 任务切换挂起标志 */
 
 /* 临界区嵌套计数器 */
-volatile UBaseType_t uxCriticalNesting = 0xaaaaaaaa;
+volatile UBaseType_t uxCriticalNesting = 0U;
 
 BaseType_t htPortStartScheduler(void)
 {
@@ -53,6 +51,7 @@ void htSchedulerInit(void)
 	xSchedulerState = HT_SCHEDULER_NOT_STARTED;
 	uxSchedulerSuspended = 0;
 	xYieldPending = htFALSE;
+	uxCriticalNesting = 0;
 }
 
 /**
@@ -136,21 +135,7 @@ void htResumeScheduler(void)
  */
 void htSchedulerTickHandler(void)
 {
-	/* 进入临界区 */
-	htEnterCritical();
-
-	/* 增加系统滴答计数 */
-	htIncrementTick();
-
-	/* 检查是否有延时任务到期 */
-
-	/* 在延时任务列表中查找是否有任务延时到期 */
-	/* 将到期的任务从延时列表中移动到就绪列表 */
-
-	/* 检查是否需要切换任务 */
-
-	/* 退出临界区 */
-	htExitCritical();
+	htTaskTickInc();
 }
 
 /**
@@ -221,8 +206,11 @@ void htTaskSwitchContext(void)
 	/* 获取就绪列表 */
 	htList_t *pxList = &(pxReadyTasksLists[uxTopPriority]);
 
-	/* 从就绪列表中获取下一个任务 */
-	htListItem_t *pxNextTCB = htListGetHead(pxList);
+	/* 从当前索引向后轮转，跳过列表尾哨兵。 */
+	htListItem_t *pxNextTCB = htListGetNext(pxList->pxIndex);
+	if (pxNextTCB == &(pxList->xListEnd)) {
+		pxNextTCB = htListGetNext(pxNextTCB);
+	}
 
 	/* 如果找到就绪任务 */
 	if (pxNextTCB != NULL) {

@@ -1,0 +1,5 @@
+tests/*.out
+tests/*.pdb
+tests/test_results.txt
+tests/__pycache__/
+.codex/build_logs/

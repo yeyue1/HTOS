@@ -26,7 +26,7 @@
  * - 总的空闲列表数量 = FL_COUNT × SL_COUNT
  */
 #define TLSF_SL_INDEX_COUNT_LOG2 4 /* 二级索引位数 (2^4=16个二级索引) */
-#define TLSF_FL_INDEX_MAX 13 /* 最大一级索引值 (支持最大2^13字节) */
+#define TLSF_FL_INDEX_MAX 14 /* 支持小于2^14字节的块，覆盖12KB默认堆 */
 #define TLSF_SL_INDEX_COUNT (1 << TLSF_SL_INDEX_COUNT_LOG2) /* 16个二级索引 */
 #define TLSF_FL_INDEX_SHIFT (TLSF_SL_INDEX_COUNT_LOG2 + 3) /* 8，小块阈值为2^8=256字节 */
 #define TLSF_FL_INDEX_COUNT (TLSF_FL_INDEX_MAX - TLSF_FL_INDEX_SHIFT + 1) /* 一级索引数量 */
@@ -39,8 +39,7 @@
  * - 32位数据必须4字节对齐
  * - 所有分配的内存块都按TLSF_ALIGN_SIZE对齐
  */
-#define TLSF_ALIGN_SIZE_LOG2 2 /* 对齐位数：2^2 = 4字节对齐 */
-#define TLSF_ALIGN_SIZE (1 << TLSF_ALIGN_SIZE_LOG2) /* 4字节对齐 */
+#define TLSF_ALIGN_SIZE (sizeof(void *)) /* 满足目标平台的指针对齐要求 */
 
 /**
  * 块状态位定义
@@ -152,7 +151,5 @@ size_t htGetFreeHeapSize(void);
  * @note 用于评估内存使用峰值和检测内存泄漏
  */
 size_t htGetMinimumEverFreeHeapSize(void);
-
-static inline int tlsf_block_within_heap(const block_header_t *block);
 
 #endif /* HT_MEM_H */

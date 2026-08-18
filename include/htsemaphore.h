@@ -5,7 +5,6 @@
 #include "htqueue.h"
 #include "httask.h"
 
-
 /* 信号量句柄定义 */
 typedef QueueHandle_t SemaphoreHandle_t;
 
@@ -26,9 +25,8 @@ void htSemaphoreDelete(SemaphoreHandle_t xSemaphore);
 BaseType_t htSemaphoreTake(SemaphoreHandle_t xSemaphore, TickType_t xTicksToWait);
 BaseType_t htSemaphoreTakeFromISR(SemaphoreHandle_t xSemaphore, BaseType_t *pxHigherPriorityTaskWoken);
 
-/*互斥量获取*/
+/* 普通互斥量使用有上限的二值令牌，不提供递归计数。 */
 BaseType_t htSemaphoreTakeMutex(SemaphoreHandle_t xSemaphore, TickType_t xTicksToWait);
-
 
 /* 递归互斥量获取 */
 BaseType_t htSemaphoreTakeRecursive(SemaphoreHandle_t xSemaphore, TickType_t xTicksToWait);

@@ -4,6 +4,7 @@
 #include "httypes.h"
 #include "htlist.h"
 
+void vPortStartFirstTask(void);
 #define htPortStartFirstTask vPortStartFirstTask
 
 /* 任务函数类型定义 */
@@ -33,6 +34,8 @@ extern htTCB_t *pxCurrentTCB; /* 当前运行的任务TCB */
 extern UBaseType_t uxCurrentNumberOfTasks; /* 当前任务数量 */
 extern TickType_t xTickCount; /* 系统tick计数 */
 extern htList_t pxAllocatedTasksList; /* 所有任务列表 */
+extern htList_t *pxDelayedTaskList;
+extern htList_t *pxOverflowDelayedTaskList;
 /* 就绪列表声明 */
 extern htList_t pxReadyTasksLists[];
 
@@ -60,7 +63,6 @@ void htTaskSwitchContext(void);
 // 获取所有任务信息
 htList_t htTaskGetAllTaskInfo(void);
 /* 空闲任务相关函数声明 */
-static void htprvIdleTask(void *pvParameters);
 BaseType_t htprvCreateIdleTask(void);
 
 #endif /* HTTASK_H */
