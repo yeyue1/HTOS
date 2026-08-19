@@ -53,5 +53,5 @@ int main(void) {
 - Windows Clang：验证测试入口和代码的跨平台性。
 - clang-format、clang-tidy、cppcheck：失败时直接阻断 CI。
 
-CI 还会使用 `tests/stubs` 中的最小 CMSIS 边界对 Cortex-M 系统封装、任务、调度器和工具代码做语法和警告检查。
+CI 还会使用 `tests/stubs` 中的最小 CMSIS 边界对 Cortex-M 系统封装、任务、调度器和工具代码做语法和警告检查，并用 Clang 的 `arm-none-eabi` 目标验证 GCC/Thumb 上下文切换端口。
 这些 stub 只用于编译门禁，不模拟硬件；仓库目前未包含完整的厂商 HAL 和板级链接工程。

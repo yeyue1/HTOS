@@ -136,7 +136,7 @@ HTOS/
 ## 已知限制与后续方向
 
 - 仓库没有提供完整的 STM32F1 HAL、启动文件、链接脚本和板级工程；CI 不能代替真实固件链接与上板测试。
-- `portable/Cortex-M/htPortContext.c` 仍为 Keil 风格汇编，并带有固定 SRAM 地址范围检查；迁移到其他 MCU 前必须参数化。
+- `portable/Cortex-M/htPortContext.c` 已改为 GCC/Thumb 内联汇编，可直接由 `arm-none-eabi-gcc` 构建；CMSIS 核心头文件通过 `HT_PORT_CORE_HEADER` 覆盖，SRAM 栈地址检查默认关闭，启用时用 `HT_PORT_VALIDATE_STACK`、`HT_PORT_SRAM_START` 和 `HT_PORT_SRAM_END` 按链接脚本配置。
 - 递归互斥量仍是实验路径，未纳入当前主机回归套件；实时代码优先使用普通互斥令牌。
 - 任务通知、软件定时器、事件组和看门狗服务尚未实现；`configUSE_TASK_NOTIFICATIONS` 默认关闭。
 - `htGetCPUUsage()`、`htGetIdleRunTimePercent()` 和 `htGetRunTimeCounter()` 暂未接入硬件运行时计数器。
