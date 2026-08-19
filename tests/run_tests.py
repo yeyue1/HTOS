@@ -11,16 +11,30 @@ from pathlib import Path
 
 TEST_DIRECTORY = Path(__file__).resolve().parent
 TEST_SPECS = {
-    "test_example.out": ["test_example.c", "unity.c"],
-    "test_list.out": ["test_list.c", "unity.c", "../kernel/htlist.c"],
-    "test_queue.out": [
-        "test_queue.c",
-        "unity.c",
-        "../kernel/htqueue.c",
-        "../kernel/htsemaphore.c",
-        "../kernel/htlist.c",
-    ],
-    "test_mem.out": ["test_mem.c", "unity.c", "../kernel/htmem.c"],
+    "test_example.out": {"sources": ["test_example.c", "unity.c"]},
+    "test_list.out": {"sources": ["test_list.c", "unity.c", "../kernel/htlist.c"]},
+    "test_queue.out": {
+        "sources": [
+            "test_queue.c",
+            "unity.c",
+            "../kernel/htqueue.c",
+            "../kernel/htsemaphore.c",
+            "../kernel/htlist.c",
+        ]
+    },
+    "test_mem.out": {"sources": ["test_mem.c", "unity.c", "../kernel/htmem.c"]},
+    "test_task.out": {
+        "sources": ["test_task.c", "unity.c", "../kernel/httask.c", "../kernel/htlist.c"],
+        "extra_flags": [
+            "-DHTOS_HOST_TEST",
+            "-Wno-pointer-to-int-cast",
+            "-Wno-int-to-pointer-cast",
+            "-Istubs",
+        ],
+    },
+    "test_utils.out": {
+        "sources": ["test_utils.c", "unity.c", "../kernel/htutils.c"],
+    },
 }
 
 
@@ -39,15 +53,16 @@ def build_tests(compiler: str) -> int:
     flags = shlex.split(os.environ.get("CFLAGS", default_flags), posix=os.name != "nt")
     linker_flags = shlex.split(os.environ.get("LDFLAGS", ""), posix=os.name != "nt")
 
-    for target, sources in TEST_SPECS.items():
+    for target, spec in TEST_SPECS.items():
         command = [
             compiler,
             *flags,
+            *spec.get("extra_flags", []),
             "-I.",
             "-I../include",
             "-o",
             target,
-            *sources,
+            *spec["sources"],
             *linker_flags,
         ]
         print("Building:", " ".join(command))

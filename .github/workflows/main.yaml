@@ -80,10 +80,12 @@ jobs:
       - name: Check formatting
         run: |
           clang-format --dry-run --Werror \
-            include/htlist.h include/htmem.h include/htqueue.h include/htsemaphore.h include/httask.h \
-            kernel/htlist.c kernel/htmem.c kernel/htqueue.c kernel/htscheduler.c kernel/httask.c \
-            tests/stubs/core_cm3.h tests/stubs/stm32f1xx_hal.h \
-            tests/test_example.c tests/test_list.c tests/test_mem.c tests/test_queue.c
+            include/htconfig.h include/htlist.h include/htmem.h include/htqueue.h include/htscheduler.h \
+            include/htsemaphore.h include/httask.h \
+            include/httypes.h include/htutils.h \
+            kernel/htlist.c kernel/htmem.c kernel/htos.c kernel/htqueue.c kernel/htscheduler.c kernel/httask.c kernel/htutils.c \
+            tests/stubs/core_cm3.h tests/stubs/stm32f1xx.h tests/stubs/stm32f1xx_hal.h \
+            tests/test_example.c tests/test_list.c tests/test_mem.c tests/test_queue.c tests/test_task.c tests/test_utils.c
 
       - name: Run clang-tidy safety checks
         run: |
@@ -99,7 +101,7 @@ jobs:
             -std=c11 -Wall -Wextra -Wpedantic -Werror \
             -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
             -Itests/stubs -Iinclude \
-            kernel/httask.c kernel/htscheduler.c
+            kernel/htos.c kernel/httask.c kernel/htscheduler.c kernel/htutils.c
 
       - name: Run cppcheck
         run: |

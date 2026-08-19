@@ -64,6 +64,8 @@ BaseType_t htQueueReceive(QueueHandle_t xQueue, void *pvBuffer, TickType_t xTick
 BaseType_t htQueueReceiveFromISR(QueueHandle_t xQueue, void *pvBuffer, BaseType_t *pxHigherPriorityTaskWoken);
 
 UBaseType_t htQueueMessagesWaiting(QueueHandle_t xQueue);
+UBaseType_t htQueueSpacesAvailable(QueueHandle_t xQueue);
+BaseType_t htQueueOverwrite(QueueHandle_t xQueue, const void *pvItemToQueue);
 BaseType_t htQueueReset(QueueHandle_t xQueue);
 BaseType_t htQueuePeek(QueueHandle_t xQueue, void *pvBuffer, TickType_t xTicksToWait);
 

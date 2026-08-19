@@ -4,7 +4,7 @@
 
 ## 目录结构
 
-`run_tests.py` 是 Windows/Linux 共用的唯一测试入口，会以 `-Werror` 编译并运行列表、队列和堆分配器的主机回归测试。
+`run_tests.py` 是 Windows/Linux 共用的唯一测试入口，会以 `-Werror` 编译并运行列表、队列、堆分配器、任务状态机和栈监控的主机回归测试。
 
 ## 使用方法
 
@@ -53,5 +53,5 @@ int main(void) {
 - Windows Clang：验证测试入口和代码的跨平台性。
 - clang-format、clang-tidy、cppcheck：失败时直接阻断 CI。
 
-CI 还会使用 `tests/stubs` 中的最小 CMSIS 边界对 Cortex-M 任务与调度器代码做语法和警告检查。
+CI 还会使用 `tests/stubs` 中的最小 CMSIS 边界对 Cortex-M 系统封装、任务、调度器和工具代码做语法和警告检查。
 这些 stub 只用于编译门禁，不模拟硬件；仓库目前未包含完整的厂商 HAL 和板级链接工程。

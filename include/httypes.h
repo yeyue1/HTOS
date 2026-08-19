@@ -32,6 +32,7 @@ enum htTaskStatus {
 	HT_TASK_RUNNING, /* 任务运行中 */
 	HT_TASK_BLOCKED, /* 任务阻塞 */
 	HT_TASK_SUSPENDED, /* 任务挂起 */
+	HT_TASK_INVALID, /* 无效任务句柄 */
 };
 typedef enum htTaskStatus htTaskStatus_t;
 

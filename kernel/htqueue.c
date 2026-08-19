@@ -338,6 +338,47 @@ UBaseType_t htQueueMessagesWaiting(QueueHandle_t xQueue)
 }
 
 /**
+ * 查询队列剩余空间。
+ */
+UBaseType_t htQueueSpacesAvailable(QueueHandle_t xQueue)
+{
+	htQUEUE_t *pxQueue = (htQUEUE_t *)xQueue;
+	UBaseType_t uxReturn;
+
+	if (pxQueue == NULL) {
+		return 0U;
+	}
+
+	htEnterCritical();
+	uxReturn = pxQueue->uxMessagesWaiting < pxQueue->uxLength ? pxQueue->uxLength - pxQueue->uxMessagesWaiting : 0U;
+	htExitCritical();
+	return uxReturn;
+}
+
+/**
+ * 写入长度为 1 的数据队列；队列已满时覆盖旧值。
+ */
+BaseType_t htQueueOverwrite(QueueHandle_t xQueue, const void *pvItemToQueue)
+{
+	htQUEUE_t *pxQueue = (htQUEUE_t *)xQueue;
+	if (pxQueue == NULL || pvItemToQueue == NULL || pxQueue->uxLength != 1U || pxQueue->uxItemSize == 0U) {
+		return htFAIL;
+	}
+
+	htEnterCritical();
+	if (pxQueue->uxMessagesWaiting == 0U) {
+		prvCopyDataToQueue(pxQueue, pvItemToQueue);
+		(void)prvUnblockFirstTask(&(pxQueue->xTasksWaitingToReceive));
+	} else {
+		memcpy(pxQueue->pcHead, pvItemToQueue, pxQueue->uxItemSize);
+		pxQueue->pcWriteTo = pxQueue->pcHead;
+		pxQueue->u.xQueue.pcReadFrom = pxQueue->pcHead;
+	}
+	htExitCritical();
+	return htPASS;
+}
+
+/**
  * 重置队列
  */
 BaseType_t htQueueReset(QueueHandle_t xQueue)

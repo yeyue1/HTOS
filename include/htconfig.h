@@ -31,7 +31,7 @@
 #define configUSE_RECURSIVE_MUTEXES 1 /* 使用递归互斥锁 */
 #define configUSE_COUNTING_SEMAPHORES 1 /* 使用计数信号量 */
 #define configUSE_QUEUE_SETS 0 /* 使用队列集 */
-#define configUSE_TASK_NOTIFICATIONS 1 /* 使用任务通知 */
+#define configUSE_TASK_NOTIFICATIONS 0 /* 任务通知 API 尚未实现 */
 
 /* 空闲任务配置 */
 #define configDEBUG_IDLE_STATS 0 /* 启用空闲任务状态打印 */

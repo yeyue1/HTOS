@@ -130,8 +130,10 @@ BaseType_t htTaskCreate(TaskFunction_t pxTaskCode, const char *const pcName, con
 		pxStack = (StackType_t *)htPortMalloc(usActualStackDepth * sizeof(StackType_t));
 
 		if (pxStack != NULL) {
-			/* 确保栈初始化为0，避免垃圾值 */
-			memset(pxStack, 0, usActualStackDepth * sizeof(StackType_t));
+			/* 预填充栈，供运行时高水位统计。 */
+			for (UBaseType_t uxIndex = 0U; uxIndex < usActualStackDepth; uxIndex++) {
+				pxStack[uxIndex] = htTASK_STACK_FILL_VALUE;
+			}
 
 			/* 初始化TCB内存 */
 			memset(pxNewTCB, 0, sizeof(htTCB_t));
@@ -333,13 +335,166 @@ void htTaskDelay(TickType_t xTicksToDelay)
 }
 
 /**
+ * 按绝对周期延时，避免周期任务逐次漂移。
+ */
+BaseType_t htTaskDelayUntil(TickType_t *pxPreviousWakeTime, TickType_t xTimeIncrement)
+{
+	if (pxPreviousWakeTime == NULL || xTimeIncrement == 0U || xTimeIncrement > INT32_MAX) {
+		return htFAIL;
+	}
+
+	const TickType_t xNextWakeTime = *pxPreviousWakeTime + xTimeIncrement;
+	const int32_t xTicksRemaining = (int32_t)(xNextWakeTime - xTickCount);
+	*pxPreviousWakeTime = xNextWakeTime;
+	if (xTicksRemaining <= 0) {
+		return htFAIL;
+	}
+
+	htTaskDelay((TickType_t)xTicksRemaining);
+	return htPASS;
+}
+
+UBaseType_t htTaskPriorityGet(TaskHandle_t xTask)
+{
+	htTCB_t *pxTCB = xTask == NULL ? pxCurrentTCB : (htTCB_t *)xTask;
+	return pxTCB == NULL ? 0U : pxTCB->uxPriority;
+}
+
+void htTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority)
+{
+	htTCB_t *pxTCB = xTask == NULL ? pxCurrentTCB : (htTCB_t *)xTask;
+	if (pxTCB == NULL) {
+		return;
+	}
+	if (uxNewPriority >= configMAX_PRIORITIES) {
+		uxNewPriority = configMAX_PRIORITIES - 1U;
+	}
+
+	BaseType_t xYieldRequired = htFALSE;
+	htEnterCritical();
+	const UBaseType_t uxOldPriority = pxTCB->uxPriority;
+	if (uxOldPriority != uxNewPriority) {
+		if (pxTCB->uxTaskState == HT_TASK_READY || pxTCB->uxTaskState == HT_TASK_RUNNING) {
+			htListRemove(&(pxTCB->xStateListItem));
+		}
+
+		htList_t *pxEventList = (htList_t *)pxTCB->xEventListItem.pxContainer;
+		if (pxEventList != NULL) {
+			htListRemove(&(pxTCB->xEventListItem));
+		}
+
+		pxTCB->uxPriority = uxNewPriority;
+		pxTCB->uxBasePriority = uxNewPriority;
+		htListSetItemValue(&(pxTCB->xAllListItem), configMAX_PRIORITIES - uxNewPriority);
+		htListSetItemValue(&(pxTCB->xEventListItem), configMAX_PRIORITIES - uxNewPriority);
+
+		if (pxTCB->uxTaskState == HT_TASK_READY || pxTCB->uxTaskState == HT_TASK_RUNNING) {
+			htListSetItemValue(&(pxTCB->xStateListItem), configMAX_PRIORITIES - uxNewPriority);
+			htListInsertEnd(&(pxReadyTasksLists[uxNewPriority]), &(pxTCB->xStateListItem));
+		}
+		if (pxEventList != NULL) {
+			htListInsert(pxEventList, &(pxTCB->xEventListItem));
+		}
+
+		if (pxCurrentTCB != NULL && ((pxTCB == pxCurrentTCB && uxNewPriority < uxOldPriority) ||
+											(pxTCB != pxCurrentTCB && pxTCB->uxTaskState == HT_TASK_READY &&
+													uxNewPriority > pxCurrentTCB->uxPriority))) {
+			xYieldRequired = htTRUE;
+		}
+	}
+	htExitCritical();
+	if (xYieldRequired == htTRUE) {
+		htTaskYield();
+	}
+}
+
+void htTaskSuspend(TaskHandle_t xTaskToSuspend)
+{
+	htTCB_t *pxTCB = xTaskToSuspend == NULL ? pxCurrentTCB : (htTCB_t *)xTaskToSuspend;
+	if (pxTCB == NULL || pxTCB->uxTaskState == HT_TASK_SUSPENDED) {
+		return;
+	}
+
+	const BaseType_t xSuspendCurrent = pxTCB == pxCurrentTCB ? htTRUE : htFALSE;
+	htEnterCritical();
+	htListRemove(&(pxTCB->xStateListItem));
+	htListRemove(&(pxTCB->xEventListItem));
+	pxTCB->uxTaskState = HT_TASK_SUSPENDED;
+	htListSetItemValue(&(pxTCB->xStateListItem), 0U);
+	htListInsertEnd(&xSuspendedTaskList, &(pxTCB->xStateListItem));
+	htExitCritical();
+
+	if (xSuspendCurrent == htTRUE) {
+		htTaskYield();
+	}
+}
+
+static BaseType_t prvResumeTask(htTCB_t *pxTCB)
+{
+	if (pxTCB == NULL || pxTCB->uxTaskState != HT_TASK_SUSPENDED ||
+			pxTCB->xStateListItem.pxContainer != &xSuspendedTaskList) {
+		return htFALSE;
+	}
+
+	htListRemove(&(pxTCB->xStateListItem));
+	htListSetItemValue(&(pxTCB->xStateListItem), configMAX_PRIORITIES - pxTCB->uxPriority);
+	pxTCB->uxTaskState = HT_TASK_READY;
+	htListInsertEnd(&(pxReadyTasksLists[pxTCB->uxPriority]), &(pxTCB->xStateListItem));
+	return pxCurrentTCB == NULL || pxTCB->uxPriority > pxCurrentTCB->uxPriority ? htTRUE : htFALSE;
+}
+
+void htTaskResume(TaskHandle_t xTaskToResume)
+{
+	htTCB_t *pxTCB = (htTCB_t *)xTaskToResume;
+	BaseType_t xYieldRequired;
+	htEnterCritical();
+	xYieldRequired = prvResumeTask(pxTCB);
+	htExitCritical();
+	if (xYieldRequired == htTRUE) {
+		htTaskYield();
+	}
+}
+
+BaseType_t htTaskResumeFromISR(TaskHandle_t xTaskToResume)
+{
+	return prvResumeTask((htTCB_t *)xTaskToResume);
+}
+
+TaskHandle_t htTaskGetCurrentTaskHandle(void)
+{
+	return (TaskHandle_t)pxCurrentTCB;
+}
+
+char *htTaskGetName(TaskHandle_t xTaskToQuery)
+{
+	htTCB_t *pxTCB = xTaskToQuery == NULL ? pxCurrentTCB : (htTCB_t *)xTaskToQuery;
+	return pxTCB == NULL ? NULL : pxTCB->pcTaskName;
+}
+
+htTaskStatus_t htTaskGetState(TaskHandle_t xTask)
+{
+	htTCB_t *pxTCB = xTask == NULL ? pxCurrentTCB : (htTCB_t *)xTask;
+	return pxTCB == NULL ? HT_TASK_INVALID : (htTaskStatus_t)pxTCB->uxTaskState;
+}
+
+void htTaskStartScheduler(void)
+{
+	htStartScheduler();
+}
+
+/**
  * 任务调度函数
  * 让出CPU控制权，切换到其他任务
  */
 void htTaskYield(void)
 {
+#if defined(HTOS_HOST_TEST)
+	extern void htHostTestYieldHook(void);
+	htHostTestYieldHook();
+#else
 	/* 触发PendSV中断，进行上下文切换 */
 	*((volatile uint32_t *)0xE000ED04) = 0x10000000; /* 设置PENDSVSET位 */
+#endif
 
 	//    /* 内存屏障，确保之前的写操作完成 */
 	//    __asm volatile ("dsb" ::: "memory");

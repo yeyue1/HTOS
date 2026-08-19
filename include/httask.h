@@ -10,6 +10,9 @@ void vPortStartFirstTask(void);
 /* 任务函数类型定义 */
 typedef void (*TaskFunction_t)(void *pvParameters);
 
+/* 新建任务栈填充值，用于运行时高水位检查。 */
+#define htTASK_STACK_FILL_VALUE ((StackType_t)0xA5A5A5A5U)
+
 /* 任务控制块(TCB)结构 */
 typedef struct htTaskControlBlock {
 	StackType_t *pxTopOfStack; /* 任务堆栈指针,注意任务堆栈必须在第一个，否则无法切换 */
@@ -50,12 +53,11 @@ UBaseType_t htTaskPriorityGet(TaskHandle_t xTask);
 void htTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority);
 void htTaskSuspend(TaskHandle_t xTaskToSuspend);
 void htTaskResume(TaskHandle_t xTaskToResume);
-void htTaskResumeFromISR(TaskHandle_t xTaskToResume);
+BaseType_t htTaskResumeFromISR(TaskHandle_t xTaskToResume);
 TaskHandle_t htTaskGetCurrentTaskHandle(void);
 char *htTaskGetName(TaskHandle_t xTaskToQuery);
 htTaskStatus_t htTaskGetState(TaskHandle_t xTask);
 void htTaskStartScheduler(void);
-void htTaskEndScheduler(void);
 void htTaskTickInc(void);
 /* 任务调度相关函数声明 */
 void htTaskYield(void);

@@ -3,10 +3,9 @@
 
 #include "httypes.h"
 
-
-
 /* 调度器初始化 */
 void htSchedulerInit(void);
+void htStartScheduler(void);
 
 /* 暂停调度器 */
 void htSuspendScheduler(void);

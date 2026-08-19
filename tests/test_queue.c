@@ -180,6 +180,42 @@ static void test_full_queue_finite_wait_expires_and_unlinks_task(void)
 	htQueueDelete(queue);
 }
 
+static void test_single_item_queue_overwrite_keeps_latest_value(void)
+{
+	reset_test_state();
+	QueueHandle_t queue = htQueueCreate(1U, sizeof(int));
+	int first = 11;
+	int latest = 22;
+	int received = 0;
+
+	TEST_ASSERT_NOT_NULL(queue);
+	TEST_ASSERT_EQUAL(1, htQueueSpacesAvailable(queue));
+	TEST_ASSERT_EQUAL(htPASS, htQueueOverwrite(queue, &first));
+	TEST_ASSERT_EQUAL(0, htQueueSpacesAvailable(queue));
+	TEST_ASSERT_EQUAL(htPASS, htQueueOverwrite(queue, &latest));
+	TEST_ASSERT_EQUAL(1, htQueueMessagesWaiting(queue));
+	TEST_ASSERT_EQUAL(htPASS, htQueueReceive(queue, &received, 0U));
+	TEST_ASSERT_EQUAL(latest, received);
+	TEST_ASSERT_EQUAL(1, htQueueSpacesAvailable(queue));
+	htQueueDelete(queue);
+}
+
+static void test_queue_overwrite_rejects_invalid_queue_shapes(void)
+{
+	reset_test_state();
+	QueueHandle_t multi_item_queue = htQueueCreate(2U, sizeof(int));
+	QueueHandle_t semaphore = htQueueCreate(1U, 0U);
+	int value = 7;
+
+	TEST_ASSERT_NOT_NULL(multi_item_queue);
+	TEST_ASSERT_NOT_NULL(semaphore);
+	TEST_ASSERT_EQUAL(htFAIL, htQueueOverwrite(multi_item_queue, &value));
+	TEST_ASSERT_EQUAL(htFAIL, htQueueOverwrite(semaphore, &value));
+	TEST_ASSERT_EQUAL(0, htQueueSpacesAvailable(NULL));
+	htQueueDelete(multi_item_queue);
+	htQueueDelete(semaphore);
+}
+
 int main(void)
 {
 	UnityBegin("test_queue.c");
@@ -188,5 +224,7 @@ int main(void)
 	RUN_TEST(test_queue_create_returns_null_when_storage_allocation_fails);
 	RUN_TEST(test_mutex_behaves_as_bounded_binary_token);
 	RUN_TEST(test_full_queue_finite_wait_expires_and_unlinks_task);
+	RUN_TEST(test_single_item_queue_overwrite_keeps_latest_value);
+	RUN_TEST(test_queue_overwrite_rejects_invalid_queue_shapes);
 	return UnityEnd();
 }

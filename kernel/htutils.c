@@ -1,8 +1,5 @@
 #include "htutils.h"
-#include "htos.h"
 #include "httask.h"
-#include "stm32f1xx_hal.h" // 添加此行以解决HAL_Delay未声明警告
-
 
 /**
  * 将毫秒转换为系统滴答
@@ -11,7 +8,11 @@
  */
 uint32_t htTimeToTicks(uint32_t milliseconds)
 {
-    return (uint32_t)((milliseconds * configTICK_RATE_HZ) / 1000);
+	if (milliseconds == 0U) {
+		return 0U;
+	}
+	const uint64_t ticks = ((uint64_t)milliseconds * configTICK_RATE_HZ + 999U) / 1000U;
+	return ticks > UINT32_MAX ? UINT32_MAX : (uint32_t)ticks;
 }
 
 /**
@@ -21,9 +22,9 @@ uint32_t htTimeToTicks(uint32_t milliseconds)
  */
 uint32_t htTicksToTime(TickType_t ticks)
 {
-    return (uint32_t)((ticks * 1000) / configTICK_RATE_HZ);
+	const uint64_t milliseconds = ((uint64_t)ticks * 1000U) / configTICK_RATE_HZ;
+	return milliseconds > UINT32_MAX ? UINT32_MAX : (uint32_t)milliseconds;
 }
-
 
 /**
  * 获取任务堆栈使用高水位标记
@@ -32,11 +33,16 @@ uint32_t htTicksToTime(TickType_t ticks)
  */
 UBaseType_t htGetTaskStackHighWaterMark(TaskHandle_t xTask)
 {
-    /* 防止未使用参数警告 */
-    (void)xTask;
-    
-    /* 简化实现，实际应该检查堆栈模式 */
-    return 0;
+	htTCB_t *pxTCB = xTask == NULL ? pxCurrentTCB : (htTCB_t *)xTask;
+	if (pxTCB == NULL || pxTCB->pxStack == NULL || pxTCB->uxStackDepth == 0U) {
+		return 0U;
+	}
+
+	UBaseType_t uxUntouchedWords = 0U;
+	while (uxUntouchedWords < pxTCB->uxStackDepth && pxTCB->pxStack[uxUntouchedWords] == htTASK_STACK_FILL_VALUE) {
+		uxUntouchedWords++;
+	}
+	return uxUntouchedWords;
 }
 
 /**
@@ -45,8 +51,8 @@ UBaseType_t htGetTaskStackHighWaterMark(TaskHandle_t xTask)
  */
 uint32_t htGetCPUUsage(void)
 {
-    /* 需要基于空闲任务运行时间计算 */
-    return 100 - htGetIdleRunTimePercent();
+	/* 未配置运行时计数器时返回 0，避免误报 100% 负载。 */
+	return 0U;
 }
 
 /**
@@ -55,8 +61,8 @@ uint32_t htGetCPUUsage(void)
  */
 uint32_t htGetIdleRunTimePercent(void)
 {
-    /* 简化实现 */
-    return 0;
+	/* 简化实现 */
+	return 0;
 }
 
 /**
@@ -65,5 +71,5 @@ uint32_t htGetIdleRunTimePercent(void)
  */
 uint64_t htGetRunTimeCounter(void)
 {
-    return 0;
+	return 0;
 }
