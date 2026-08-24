@@ -2,7 +2,7 @@
 
 [![HTOS quality gates](https://github.com/yeyue1/HTOS/actions/workflows/main.yaml/badge.svg)](https://github.com/yeyue1/HTOS/actions/workflows/main.yaml)
 
-HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供优先级抢占调度、同优先级时间片、任务延时、队列、信号量和 TLSF 堆分配器，并带有可在 Windows/Linux 上运行的内核回归测试。
+HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供优先级抢占调度、同优先级时间片、任务延时、任务通知、队列、信号量、静态对象创建和 TLSF 堆分配器，并带有可在 Windows/Linux 上运行的内核回归测试。
 
 > 定位：用于学习、实验和二次开发，不是经过功能安全认证的商业 RTOS。上产品前必须完成目标 MCU 编译、实机压力测试和最坏时序测量。
 
@@ -10,11 +10,12 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 
 ### 任务与调度
 
-- 动态创建任务，支持名称、参数、栈深度和 32 级优先级。
+- 支持动态创建任务，也可用 `htTaskCreateStatic()` 由调用方提供 TCB 与任务栈，避免运行期堆分配。
 - 优先级抢占和同优先级轮转。
 - `htTaskDelay()` 相对延时，支持 32 位 tick 回绕。
 - `htTaskDelayUntil()` 绝对周期延时，避免周期任务逐次漂移；错过本周期截止点时返回 `htFAIL`。
 - 任务优先级查询/修改、挂起/恢复、ISR 恢复、状态/名称/当前句柄查询。
+- 每个任务带一个 32 位直接通知槽：支持置位、递增、覆盖写、禁止覆盖写、等待和计数式获取，并提供 ISR 发送接口。
 - 当前任务自删除时由空闲任务延后回收 TCB 和栈，避免在正在使用的栈上释放自身。
 
 ### 队列与同步
@@ -24,7 +25,9 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 - ISR 发送/接收接口可返回是否唤醒更高优先级任务。
 - `htQueueSpacesAvailable()` 查询剩余容量。
 - `htQueueOverwrite()` 用于长度为 1 的数据队列，保留最新值，适合传感器快照和状态发布。
+- `htQueueCreateStatic()` 支持调用方提供队列控制块与数据区；二值/计数信号量和普通互斥令牌也可静态创建。
 - 二值信号量、计数信号量和有上限的二值互斥令牌。
+- 递归互斥量跟踪持有者和递归深度，并对发生阻塞的高优先级任务执行优先级继承。
 
 ### 内存与诊断
 
@@ -88,6 +91,39 @@ if (remaining_words < 32U) {
 }
 ```
 
+### 用任务通知代替单元素队列
+
+任务通知直接存放在目标任务的 TCB 中，适合事件位、轻量计数器和“一对一”唤醒：
+
+```c
+/* 生产者：合并多个事件位。 */
+(void)htTaskNotify(worker, 0x05U, HT_NOTIFY_SET_BITS);
+
+/* worker 任务：等待通知，并在读取后清除所有事件位。 */
+uint32_t events = 0U;
+if (htTaskNotifyWait(0U, UINT32_MAX, &events, htBLOCKED_INDEFINITELY) == htPASS) {
+	/* 处理 events */
+}
+```
+
+`htTaskNotifyGive()` / `htTaskNotifyTake()` 提供计数信号量式语义；ISR 中使用 `htTaskNotifyFromISR()` 或 `htTaskNotifyGiveFromISR()`，并检查 `pxHigherPriorityTaskWoken`。
+
+### 静态创建任务与队列
+
+静态对象不会调用 `htPortMalloc()`，其控制块和存储区必须在对象整个生命周期内保持有效：
+
+```c
+static htTCB_t worker_tcb;
+static StackType_t worker_stack[configMINIMAL_STACK_SIZE];
+static htQUEUE_t sample_queue_buffer;
+static uint8_t sample_queue_storage[4U * sizeof(uint32_t)];
+
+TaskHandle_t worker = htTaskCreateStatic(WorkerTask, "worker", configMINIMAL_STACK_SIZE, NULL,
+		HT_NORMAL_TASK, worker_stack, &worker_tcb);
+QueueHandle_t samples = htQueueCreateStatic(
+		4U, sizeof(uint32_t), sample_queue_storage, &sample_queue_buffer);
+```
+
 ## 主机测试
 
 需要 Python 3 和 GCC 或 Clang。
@@ -98,7 +134,7 @@ python tests/run_tests.py --build --cc clang
 python tests/run_tests.py --clean
 ```
 
-也可在 `tests/` 目录使用 `make test`。测试覆盖列表、TLSF 堆、队列/信号量、有限超时、tick 回绕、任务状态转换、队列覆盖和栈高水位。
+也可在 `tests/` 目录使用 `make test`。当前主机套件包含 247 个断言，覆盖列表、TLSF 堆、队列/信号量、任务通知、静态对象、递归互斥量、有限超时、tick 回绕、任务状态转换、队列覆盖和栈高水位。
 
 统一构建入口在 `codex_build.toml`：
 
@@ -137,8 +173,9 @@ HTOS/
 
 - 仓库没有提供完整的 STM32F1 HAL、启动文件、链接脚本和板级工程；CI 不能代替真实固件链接与上板测试。
 - `portable/Cortex-M/htPortContext.c` 已改为 GCC/Thumb 内联汇编，可直接由 `arm-none-eabi-gcc` 构建；CMSIS 核心头文件通过 `HT_PORT_CORE_HEADER` 覆盖，SRAM 栈地址检查默认关闭，启用时用 `HT_PORT_VALIDATE_STACK`、`HT_PORT_SRAM_START` 和 `HT_PORT_SRAM_END` 按链接脚本配置。
-- 递归互斥量仍是实验路径，未纳入当前主机回归套件；实时代码优先使用普通互斥令牌。
-- 任务通知、软件定时器、事件组和看门狗服务尚未实现；`configUSE_TASK_NOTIFICATIONS` 默认关闭。
+- 普通互斥量仍是有上限的二值令牌，不跟踪持有者；递归互斥量已覆盖单锁的持有者、递归深度、超时与优先级继承，但多把互斥量嵌套持有时的优先级回退尚未建模。
+- 静态分配目前覆盖任务、通用队列、二值/计数信号量和普通互斥令牌；递归互斥量仍通过动态创建接口构造。
+- 软件定时器、事件组和看门狗服务尚未实现。软件定时器应在专用服务任务、命令队列和回调上下文约束明确后再加入。
 - `htGetCPUUsage()`、`htGetIdleRunTimePercent()` 和 `htGetRunTimeCounter()` 暂未接入硬件运行时计数器。
 - 栈高水位是涂色扫描的历史估计；量产版还应增加 MPU/PSPLIM（如芯片支持）、栈溢出钩子和故障注入测试。
 

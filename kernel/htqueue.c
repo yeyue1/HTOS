@@ -7,18 +7,12 @@
 /**
  * 初始化队列
  */
-static BaseType_t prvInitialiseNewQueue(UBaseType_t uxQueueLength, UBaseType_t uxItemSize, htQUEUE_t *pxNewQueue)
+static BaseType_t prvInitialiseNewQueue(UBaseType_t uxQueueLength, UBaseType_t uxItemSize, int8_t *pcQueueStorage,
+		htQUEUE_t *pxNewQueue, uint8_t ucStaticallyAllocated)
 {
-	/* 队列结构已分配，现在创建队列存储区 */
-	if (uxItemSize == 0) {
-		/* 二值信号量或计数信号量不需要存储区 */
-		pxNewQueue->pcHead = NULL;
-	} else {
-		/* 分配队列存储区 */
-		pxNewQueue->pcHead = (int8_t *)htPortMalloc(uxQueueLength * uxItemSize);
-	}
-
-	if (pxNewQueue->pcHead != NULL || uxItemSize == 0) {
+	if (pxNewQueue != NULL && (pcQueueStorage != NULL || uxItemSize == 0U)) {
+		memset(pxNewQueue, 0, sizeof(*pxNewQueue));
+		pxNewQueue->pcHead = pcQueueStorage;
 		/* 初始化队列成员 */
 		pxNewQueue->uxLength = uxQueueLength;
 		pxNewQueue->uxItemSize = uxItemSize;
@@ -26,6 +20,7 @@ static BaseType_t prvInitialiseNewQueue(UBaseType_t uxQueueLength, UBaseType_t u
 		pxNewQueue->uxMessagesWaiting = 0;
 		pxNewQueue->cRxLock = htQUEUE_UNLOCKED;
 		pxNewQueue->cTxLock = htQUEUE_UNLOCKED;
+		pxNewQueue->ucStaticallyAllocated = ucStaticallyAllocated;
 
 		/* 初始化指针 */
 		if (uxItemSize > 0) {
@@ -52,6 +47,7 @@ static BaseType_t prvInitialiseNewQueue(UBaseType_t uxQueueLength, UBaseType_t u
 QueueHandle_t htQueueCreate(UBaseType_t uxQueueLength, UBaseType_t uxItemSize)
 {
 	htQUEUE_t *pxNewQueue;
+	int8_t *pcQueueStorage = NULL;
 
 	/* 至少有一个空间 */
 	if (uxQueueLength < 1U || (uxItemSize != 0U && uxQueueLength > SIZE_MAX / uxItemSize)) {
@@ -62,13 +58,39 @@ QueueHandle_t htQueueCreate(UBaseType_t uxQueueLength, UBaseType_t uxItemSize)
 	pxNewQueue = (htQUEUE_t *)htPortMalloc(sizeof(htQUEUE_t));
 
 	if (pxNewQueue != NULL) {
-		if (prvInitialiseNewQueue(uxQueueLength, uxItemSize, pxNewQueue) != htPASS) {
+		if (uxItemSize != 0U) {
+			pcQueueStorage = (int8_t *)htPortMalloc(uxQueueLength * uxItemSize);
+		}
+		if (prvInitialiseNewQueue(uxQueueLength, uxItemSize, pcQueueStorage, pxNewQueue, 0U) != htPASS) {
+			htPortFree(pcQueueStorage);
 			htPortFree(pxNewQueue);
 			pxNewQueue = NULL;
 		}
 	}
 
 	return pxNewQueue;
+}
+
+QueueHandle_t htQueueCreateStatic(
+		UBaseType_t uxQueueLength, UBaseType_t uxItemSize, uint8_t *pucQueueStorage, htQUEUE_t *pxQueueBuffer)
+{
+#if configSUPPORT_STATIC_ALLOCATION == 1
+	if (pxQueueBuffer == NULL || uxQueueLength < 1U ||
+			(uxItemSize != 0U && (pucQueueStorage == NULL || uxQueueLength > SIZE_MAX / uxItemSize))) {
+		return NULL;
+	}
+
+	if (prvInitialiseNewQueue(uxQueueLength, uxItemSize, (int8_t *)pucQueueStorage, pxQueueBuffer, 1U) != htPASS) {
+		return NULL;
+	}
+	return pxQueueBuffer;
+#else
+	(void)uxQueueLength;
+	(void)uxItemSize;
+	(void)pucQueueStorage;
+	(void)pxQueueBuffer;
+	return NULL;
+#endif
 }
 
 /**
@@ -416,6 +438,15 @@ void htQueueDelete(QueueHandle_t xQueue)
 	htQUEUE_t *pxQueue = (htQUEUE_t *)xQueue;
 
 	if (pxQueue != NULL) {
+		if (pxQueue->ucStaticallyAllocated != 0U) {
+			pxQueue->pcHead = NULL;
+			pxQueue->pcWriteTo = NULL;
+			pxQueue->uxMessagesWaiting = 0U;
+			pxQueue->uxLength = 0U;
+			pxQueue->uxItemSize = 0U;
+			return;
+		}
+
 		/* 释放队列存储区 */
 		if (pxQueue->pcHead != NULL) {
 			htPortFree(pxQueue->pcHead);

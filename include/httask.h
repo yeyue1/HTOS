@@ -10,6 +10,20 @@ void vPortStartFirstTask(void);
 /* 任务函数类型定义 */
 typedef void (*TaskFunction_t)(void *pvParameters);
 
+typedef enum htNotifyAction {
+	HT_NOTIFY_NO_ACTION = 0,
+	HT_NOTIFY_SET_BITS,
+	HT_NOTIFY_INCREMENT,
+	HT_NOTIFY_SET_VALUE_WITH_OVERWRITE,
+	HT_NOTIFY_SET_VALUE_WITHOUT_OVERWRITE,
+} htNotifyAction_t;
+
+enum {
+	HT_NOTIFY_NOT_WAITING = 0U,
+	HT_NOTIFY_WAITING,
+	HT_NOTIFY_RECEIVED,
+};
+
 /* 新建任务栈填充值，用于运行时高水位检查。 */
 #define htTASK_STACK_FILL_VALUE ((StackType_t)0xA5A5A5A5U)
 
@@ -28,6 +42,7 @@ typedef struct htTaskControlBlock {
 	UBaseType_t uxNotificationStatus; /* 任务通知状态 */
 	uint32_t ulRunTimeCounter; /* 任务运行时间计数 */
 	UBaseType_t uxStackDepth; /* 堆栈深度 */
+	uint8_t ucStaticallyAllocated; /* TCB 和任务栈由调用方提供 */
 	//   uint32_t ulDelayTime;                   /* 原始延时值，用于调试 */
 
 } htTCB_t;
@@ -45,6 +60,8 @@ extern htList_t pxReadyTasksLists[];
 /* 任务管理相关函数声明 */
 BaseType_t htTaskCreate(TaskFunction_t pxTaskCode, const char *const pcName, const uint16_t usStackDepth,
 		void *const pvParameters, UBaseType_t uxPriority, void **const pxCreatedTask);
+TaskHandle_t htTaskCreateStatic(TaskFunction_t pxTaskCode, const char *const pcName, uint16_t usStackDepth,
+		void *const pvParameters, UBaseType_t uxPriority, StackType_t *puxStackBuffer, htTCB_t *pxTaskBuffer);
 
 void htTaskDelete(TaskHandle_t xTaskToDelete);
 void htTaskDelay(TickType_t xTicksToDelay);
@@ -54,6 +71,14 @@ void htTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority);
 void htTaskSuspend(TaskHandle_t xTaskToSuspend);
 void htTaskResume(TaskHandle_t xTaskToResume);
 BaseType_t htTaskResumeFromISR(TaskHandle_t xTaskToResume);
+BaseType_t htTaskNotify(TaskHandle_t xTaskToNotify, uint32_t ulValue, htNotifyAction_t xAction);
+BaseType_t htTaskNotifyFromISR(
+		TaskHandle_t xTaskToNotify, uint32_t ulValue, htNotifyAction_t xAction, BaseType_t *pxHigherPriorityTaskWoken);
+BaseType_t htTaskNotifyGive(TaskHandle_t xTaskToNotify);
+BaseType_t htTaskNotifyGiveFromISR(TaskHandle_t xTaskToNotify, BaseType_t *pxHigherPriorityTaskWoken);
+BaseType_t htTaskNotifyWait(uint32_t ulBitsToClearOnEntry, uint32_t ulBitsToClearOnExit, uint32_t *pulNotificationValue,
+		TickType_t xTicksToWait);
+uint32_t htTaskNotifyTake(BaseType_t xClearCountOnExit, TickType_t xTicksToWait);
 TaskHandle_t htTaskGetCurrentTaskHandle(void);
 char *htTaskGetName(TaskHandle_t xTaskToQuery);
 htTaskStatus_t htTaskGetState(TaskHandle_t xTask);

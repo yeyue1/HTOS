@@ -2,10 +2,13 @@
 #include "htmem.h"
 #include "htlist.h"
 #include "htscheduler.h"
-#include <stdio.h> // 添加 stdio 头文件解决 printf 未声明问题
 #include <string.h>
 #include "stm32f1xx_hal.h"
 #include "core_cm3.h" // 添加此头文件以提供NVIC函数和中断相关定义
+
+#if configDEBUG_IDLE_STATS
+#include <stdio.h>
+#endif
 
 /* 全局变量 */
 htTCB_t *pxCurrentTCB = NULL; /* 当前运行的任务TCB */
@@ -65,11 +68,8 @@ void prvInitialiseTaskLists(void)
  */
 static StackType_t *prvInitialiseTaskStack(StackType_t *pxTopOfStack, TaskFunction_t pxCode, void *pvParameters)
 {
-	// 确保8字节对齐
-	pxTopOfStack = (StackType_t *)((((uint32_t)pxTopOfStack) & ~0x7UL));
-
-	// 首先清零整个栈区域
-	memset((void *)((uint32_t)pxTopOfStack - 64), 0, 64);
+	/* Cortex-M 异常入口要求栈顶 8 字节对齐；uintptr_t 同时兼容 64 位主机测试。 */
+	pxTopOfStack = (StackType_t *)((uintptr_t)pxTopOfStack & ~(uintptr_t)0x7U);
 
 	// 构建异常框架 - 从底向上
 	*(--pxTopOfStack) = 0x01000000; /* xPSR - T位置位 */
@@ -91,118 +91,113 @@ static StackType_t *prvInitialiseTaskStack(StackType_t *pxTopOfStack, TaskFuncti
 	*(--pxTopOfStack) = 0; /* R5 */
 	*(--pxTopOfStack) = 0; /* R4 */
 
-	// 打印任务栈配置信息 (使用英文避免编码问题)
-	printf("Task stack setup: PC=0x%08lx (with Thumb bit), Param=0x%08lx, SP=%p\r\n",
-			(unsigned long)(((uintptr_t)pxCode) | 1UL), (unsigned long)(uintptr_t)pvParameters, (void *)pxTopOfStack);
-
 	return pxTopOfStack;
 }
 
-/**
- * 创建新任务 - 确保任务创建成功
- */
+static BaseType_t prvInitialiseNewTask(TaskFunction_t pxTaskCode, const char *pcName, uint16_t usStackDepth,
+		void *pvParameters, UBaseType_t uxPriority, StackType_t *pxStack, htTCB_t *pxNewTCB,
+		uint8_t ucStaticallyAllocated)
+{
+	if (pxTaskCode == NULL || pcName == NULL || pxStack == NULL || pxNewTCB == NULL || usStackDepth == 0U) {
+		return htFAIL;
+	}
+	if (uxPriority >= configMAX_PRIORITIES) {
+		uxPriority = configMAX_PRIORITIES - 1U;
+	}
+
+	for (UBaseType_t uxIndex = 0U; uxIndex < usStackDepth; uxIndex++) {
+		pxStack[uxIndex] = htTASK_STACK_FILL_VALUE;
+	}
+	memset(pxNewTCB, 0, sizeof(*pxNewTCB));
+	pxNewTCB->pxStack = pxStack;
+	pxNewTCB->uxStackDepth = usStackDepth;
+	pxNewTCB->ucStaticallyAllocated = ucStaticallyAllocated;
+
+	size_t xNameLength = 0U;
+	while (xNameLength < (configMAX_TASK_NAME_LEN - 1U) && pcName[xNameLength] != '\0') {
+		xNameLength++;
+	}
+	memcpy(pxNewTCB->pcTaskName, pcName, xNameLength);
+	pxNewTCB->pcTaskName[xNameLength] = '\0';
+
+	pxNewTCB->pxTopOfStack = prvInitialiseTaskStack(pxStack + usStackDepth - 1U, pxTaskCode, pvParameters);
+
+	pxNewTCB->uxPriority = uxPriority;
+	pxNewTCB->uxBasePriority = uxPriority;
+	pxNewTCB->uxNotificationStatus = HT_NOTIFY_NOT_WAITING;
+
+	htListItemInit(&(pxNewTCB->xStateListItem));
+	htListItemInit(&(pxNewTCB->xEventListItem));
+	htListItemInit(&(pxNewTCB->xAllListItem));
+	htListSetItemOwner(&(pxNewTCB->xStateListItem), pxNewTCB);
+	htListSetItemOwner(&(pxNewTCB->xEventListItem), pxNewTCB);
+	htListSetItemOwner(&(pxNewTCB->xAllListItem), pxNewTCB);
+	htListSetItemValue(&(pxNewTCB->xStateListItem), configMAX_PRIORITIES - uxPriority);
+	htListSetItemValue(&(pxNewTCB->xAllListItem), configMAX_PRIORITIES - uxPriority);
+	htListInsertEnd(&pxAllocatedTasksList, &(pxNewTCB->xAllListItem));
+
+	pxNewTCB->uxTaskState = HT_TASK_READY;
+	htListInsertEnd(&(pxReadyTasksLists[uxPriority]), &(pxNewTCB->xStateListItem));
+	uxCurrentNumberOfTasks++;
+	if (pxCurrentTCB == NULL) {
+		pxCurrentTCB = pxNewTCB;
+	}
+	return htPASS;
+}
+
 BaseType_t htTaskCreate(TaskFunction_t pxTaskCode, const char *const pcName, const uint16_t usStackDepth,
 		void *const pvParameters, UBaseType_t uxPriority, TaskHandle_t *const pxCreatedTask)
 {
-	htTCB_t *pxNewTCB;
-	StackType_t *pxStack;
-	BaseType_t xReturn = htPASS;
+	if (pxCreatedTask != NULL) {
+		*pxCreatedTask = NULL;
+	}
 	if (pxTaskCode == NULL || pcName == NULL) {
 		return htFAIL;
 	}
 
-	/* 检查优先级范围 */
-	if (uxPriority >= configMAX_PRIORITIES) {
-		uxPriority = configMAX_PRIORITIES - 1;
+	const uint16_t usActualStackDepth =
+			usStackDepth < configMINIMAL_STACK_SIZE ? configMINIMAL_STACK_SIZE : usStackDepth;
+	htTCB_t *pxNewTCB = (htTCB_t *)htPortMalloc(sizeof(htTCB_t));
+	if (pxNewTCB == NULL) {
+		return htFAIL;
+	}
+	StackType_t *pxStack = (StackType_t *)htPortMalloc(usActualStackDepth * sizeof(StackType_t));
+	if (pxStack == NULL) {
+		htPortFree(pxNewTCB);
+		return htFAIL;
 	}
 
-	/* 分配TCB内存 */
-	pxNewTCB = (htTCB_t *)htPortMalloc(sizeof(htTCB_t));
-
-	if (pxNewTCB != NULL) {
-		/* 分配任务堆栈内存 */
-		// 确保分配的栈大小至少是128字节
-		uint16_t usActualStackDepth = usStackDepth;
-		if (usActualStackDepth < configMINIMAL_STACK_SIZE) {
-			usActualStackDepth = configMINIMAL_STACK_SIZE;
-		}
-
-		pxStack = (StackType_t *)htPortMalloc(usActualStackDepth * sizeof(StackType_t));
-
-		if (pxStack != NULL) {
-			/* 预填充栈，供运行时高水位统计。 */
-			for (UBaseType_t uxIndex = 0U; uxIndex < usActualStackDepth; uxIndex++) {
-				pxStack[uxIndex] = htTASK_STACK_FILL_VALUE;
-			}
-
-			/* 初始化TCB内存 */
-			memset(pxNewTCB, 0, sizeof(htTCB_t));
-
-			/* 初始化堆栈 */
-			pxNewTCB->pxStack = pxStack;
-			pxNewTCB->uxStackDepth = usActualStackDepth;
-
-			/* 复制任务名称，避免依赖平台特定的安全字符串扩展。 */
-			size_t xNameLength = 0U;
-			while (xNameLength < (configMAX_TASK_NAME_LEN - 1U) && pcName[xNameLength] != '\0') {
-				xNameLength++;
-			}
-			memcpy(pxNewTCB->pcTaskName, pcName, xNameLength);
-			pxNewTCB->pcTaskName[xNameLength] = '\0';
-
-			/* 使用安全的栈初始化函数 */
-			pxNewTCB->pxTopOfStack =
-					prvInitialiseTaskStack(pxNewTCB->pxStack + usActualStackDepth - 1, pxTaskCode, pvParameters);
-
-			/* 输出初始化结果用于调试 */
-			printf("Task %s stack: base=%p, top=%p\r\n", pxNewTCB->pcTaskName, (void *)pxNewTCB->pxStack,
-					(void *)pxNewTCB->pxTopOfStack);
-
-			/* 初始化任务优先级 */
-			pxNewTCB->uxPriority = uxPriority;
-			pxNewTCB->uxBasePriority = uxPriority;
-
-			/* 初始化列表项 */
-			htListItemInit(&(pxNewTCB->xStateListItem));
-			htListItemInit(&(pxNewTCB->xEventListItem));
-			htListItemInit(&(pxNewTCB->xAllListItem));
-			htListSetItemOwner(&(pxNewTCB->xAllListItem), pxNewTCB);
-			htListSetItemValue(&(pxNewTCB->xAllListItem), configMAX_PRIORITIES - uxPriority);
-			htListInsertEnd(&pxAllocatedTasksList, &(pxNewTCB->xAllListItem));
-
-			/* 设置列表项的所有者 */
-			htListSetItemOwner(&(pxNewTCB->xStateListItem), pxNewTCB);
-			htListSetItemOwner(&(pxNewTCB->xEventListItem), pxNewTCB);
-
-			/* 设置列表项值为优先级，用于优先级排序 */
-			htListSetItemValue(&(pxNewTCB->xStateListItem), configMAX_PRIORITIES - uxPriority);
-
-			/* 添加到就绪列表 */
-			pxNewTCB->uxTaskState = HT_TASK_READY;
-			htListInsertEnd(&(pxReadyTasksLists[uxPriority]), &(pxNewTCB->xStateListItem));
-
-			/* 更新任务计数 */
-			uxCurrentNumberOfTasks++;
-
-			/* 如果创建的是第一个任务，设为当前任务 */
-			if (pxCurrentTCB == NULL) {
-				pxCurrentTCB = pxNewTCB;
-			}
-
-			/* 返回任务句柄 */
-			if (pxCreatedTask != NULL) {
-				*pxCreatedTask = (TaskHandle_t)pxNewTCB;
-			}
-		} else {
-			/* 堆栈分配失败，释放TCB内存并返回失败 */
-			htPortFree(pxNewTCB);
-			xReturn = htFAIL;
-		}
-	} else {
-		xReturn = htFAIL;
+	if (prvInitialiseNewTask(pxTaskCode, pcName, usActualStackDepth, pvParameters, uxPriority, pxStack, pxNewTCB, 0U) !=
+			htPASS) {
+		htPortFree(pxStack);
+		htPortFree(pxNewTCB);
+		return htFAIL;
 	}
+	if (pxCreatedTask != NULL) {
+		*pxCreatedTask = (TaskHandle_t)pxNewTCB;
+	}
+	return htPASS;
+}
 
-	return xReturn;
+TaskHandle_t htTaskCreateStatic(TaskFunction_t pxTaskCode, const char *const pcName, uint16_t usStackDepth,
+		void *const pvParameters, UBaseType_t uxPriority, StackType_t *puxStackBuffer, htTCB_t *pxTaskBuffer)
+{
+#if configSUPPORT_STATIC_ALLOCATION == 1
+	if (usStackDepth < configMINIMAL_STACK_SIZE || prvInitialiseNewTask(pxTaskCode, pcName, usStackDepth, pvParameters,
+														   uxPriority, puxStackBuffer, pxTaskBuffer, 1U) != htPASS) {
+		return NULL;
+	}
+	return (TaskHandle_t)pxTaskBuffer;
+#else
+	(void)pxTaskCode;
+	(void)pcName;
+	(void)usStackDepth;
+	(void)pvParameters;
+	(void)uxPriority;
+	(void)puxStackBuffer;
+	(void)pxTaskBuffer;
+	return NULL;
+#endif
 }
 
 /**
@@ -232,8 +227,10 @@ static void prvDeleteTerminatedTasks(void)
 		htExitCritical();
 
 		if (pxTCB != NULL) {
-			htPortFree(pxTCB->pxStack);
-			htPortFree(pxTCB);
+			if (pxTCB->ucStaticallyAllocated == 0U) {
+				htPortFree(pxTCB->pxStack);
+				htPortFree(pxTCB);
+			}
 		}
 	}
 }
@@ -302,7 +299,6 @@ void htTaskDelay(TickType_t xTicksToDelay)
 
 	// 验证必要的数据结构
 	if (pxDelayedTaskList == NULL || pxCurrentTCB == NULL) {
-		printf("ERROR: Delay list or current task invalid!\r\n");
 		__enable_irq();
 		return;
 	}
@@ -443,6 +439,84 @@ static BaseType_t prvResumeTask(htTCB_t *pxTCB)
 	return pxCurrentTCB == NULL || pxTCB->uxPriority > pxCurrentTCB->uxPriority ? htTRUE : htFALSE;
 }
 
+static BaseType_t prvBlockCurrentTaskOnNotification(htTCB_t *pxTCB, TickType_t xTicksToWait)
+{
+	if (pxTCB == NULL) {
+		return htFAIL;
+	}
+	if (xTicksToWait != htBLOCKED_INDEFINITELY && (pxDelayedTaskList == NULL || pxOverflowDelayedTaskList == NULL)) {
+		return htFAIL;
+	}
+
+	htListRemove(&(pxTCB->xStateListItem));
+	htListRemove(&(pxTCB->xEventListItem));
+
+	if (xTicksToWait != htBLOCKED_INDEFINITELY) {
+		const TickType_t xTimeToWake = xTickCount + xTicksToWait;
+		htListSetItemValue(&(pxTCB->xStateListItem), xTimeToWake);
+		if (xTimeToWake > xTickCount) {
+			htListInsert(pxDelayedTaskList, &(pxTCB->xStateListItem));
+		} else {
+			htListInsert(pxOverflowDelayedTaskList, &(pxTCB->xStateListItem));
+		}
+	}
+
+	pxTCB->uxNotificationStatus = HT_NOTIFY_WAITING;
+	pxTCB->uxTaskState = HT_TASK_BLOCKED;
+	return htPASS;
+}
+
+static BaseType_t prvUnblockNotificationTask(htTCB_t *pxTCB)
+{
+	if (pxTCB == NULL || pxTCB->uxPriority >= configMAX_PRIORITIES || pxTCB->uxTaskState != HT_TASK_BLOCKED) {
+		return htFALSE;
+	}
+	htListRemove(&(pxTCB->xEventListItem));
+	htListRemove(&(pxTCB->xStateListItem));
+
+	htListSetItemValue(&(pxTCB->xStateListItem), configMAX_PRIORITIES - pxTCB->uxPriority);
+	pxTCB->uxTaskState = HT_TASK_READY;
+	htListInsertEnd(&(pxReadyTasksLists[pxTCB->uxPriority]), &(pxTCB->xStateListItem));
+	return pxCurrentTCB == NULL || pxTCB->uxPriority > pxCurrentTCB->uxPriority ? htTRUE : htFALSE;
+}
+
+static BaseType_t prvNotifyTask(htTCB_t *pxTCB, uint32_t ulValue, htNotifyAction_t xAction, BaseType_t *pxYieldRequired)
+{
+	if (pxTCB == NULL || xAction > HT_NOTIFY_SET_VALUE_WITHOUT_OVERWRITE) {
+		return htFAIL;
+	}
+	if (xAction == HT_NOTIFY_SET_VALUE_WITHOUT_OVERWRITE && pxTCB->uxNotificationStatus == HT_NOTIFY_RECEIVED) {
+		return htFAIL;
+	}
+
+	const UBaseType_t uxPreviousStatus = pxTCB->uxNotificationStatus;
+	switch (xAction) {
+		case HT_NOTIFY_NO_ACTION:
+			break;
+		case HT_NOTIFY_SET_BITS:
+			pxTCB->ulNotifiedValue |= ulValue;
+			break;
+		case HT_NOTIFY_INCREMENT:
+			if (pxTCB->ulNotifiedValue != UINT32_MAX) {
+				pxTCB->ulNotifiedValue++;
+			}
+			break;
+		case HT_NOTIFY_SET_VALUE_WITH_OVERWRITE:
+		case HT_NOTIFY_SET_VALUE_WITHOUT_OVERWRITE:
+			pxTCB->ulNotifiedValue = ulValue;
+			break;
+		default:
+			return htFAIL;
+	}
+
+	pxTCB->uxNotificationStatus = HT_NOTIFY_RECEIVED;
+	if (uxPreviousStatus == HT_NOTIFY_WAITING && prvUnblockNotificationTask(pxTCB) == htTRUE &&
+			pxYieldRequired != NULL) {
+		*pxYieldRequired = htTRUE;
+	}
+	return htPASS;
+}
+
 void htTaskResume(TaskHandle_t xTaskToResume)
 {
 	htTCB_t *pxTCB = (htTCB_t *)xTaskToResume;
@@ -458,6 +532,146 @@ void htTaskResume(TaskHandle_t xTaskToResume)
 BaseType_t htTaskResumeFromISR(TaskHandle_t xTaskToResume)
 {
 	return prvResumeTask((htTCB_t *)xTaskToResume);
+}
+
+BaseType_t htTaskNotify(TaskHandle_t xTaskToNotify, uint32_t ulValue, htNotifyAction_t xAction)
+{
+#if configUSE_TASK_NOTIFICATIONS == 1
+	htTCB_t *pxTCB = (htTCB_t *)xTaskToNotify;
+	BaseType_t xYieldRequired = htFALSE;
+	BaseType_t xReturn;
+
+	htEnterCritical();
+	xReturn = prvNotifyTask(pxTCB, ulValue, xAction, &xYieldRequired);
+	htExitCritical();
+
+	if (xReturn == htPASS && xYieldRequired == htTRUE) {
+		htTaskYield();
+	}
+	return xReturn;
+#else
+	(void)xTaskToNotify;
+	(void)ulValue;
+	(void)xAction;
+	return htFAIL;
+#endif
+}
+
+BaseType_t htTaskNotifyFromISR(
+		TaskHandle_t xTaskToNotify, uint32_t ulValue, htNotifyAction_t xAction, BaseType_t *pxHigherPriorityTaskWoken)
+{
+#if configUSE_TASK_NOTIFICATIONS == 1
+	if (pxHigherPriorityTaskWoken != NULL) {
+		*pxHigherPriorityTaskWoken = htFALSE;
+	}
+	return prvNotifyTask((htTCB_t *)xTaskToNotify, ulValue, xAction, pxHigherPriorityTaskWoken);
+#else
+	(void)xTaskToNotify;
+	(void)ulValue;
+	(void)xAction;
+	if (pxHigherPriorityTaskWoken != NULL) {
+		*pxHigherPriorityTaskWoken = htFALSE;
+	}
+	return htFAIL;
+#endif
+}
+
+BaseType_t htTaskNotifyGive(TaskHandle_t xTaskToNotify)
+{
+	return htTaskNotify(xTaskToNotify, 0U, HT_NOTIFY_INCREMENT);
+}
+
+BaseType_t htTaskNotifyGiveFromISR(TaskHandle_t xTaskToNotify, BaseType_t *pxHigherPriorityTaskWoken)
+{
+	return htTaskNotifyFromISR(xTaskToNotify, 0U, HT_NOTIFY_INCREMENT, pxHigherPriorityTaskWoken);
+}
+
+BaseType_t htTaskNotifyWait(uint32_t ulBitsToClearOnEntry, uint32_t ulBitsToClearOnExit, uint32_t *pulNotificationValue,
+		TickType_t xTicksToWait)
+{
+#if configUSE_TASK_NOTIFICATIONS == 1
+	htTCB_t *pxTCB = pxCurrentTCB;
+	if (pxTCB == NULL) {
+		return htFAIL;
+	}
+
+	htEnterCritical();
+	if (pxTCB->uxNotificationStatus != HT_NOTIFY_RECEIVED) {
+		pxTCB->ulNotifiedValue &= ~ulBitsToClearOnEntry;
+		if (xTicksToWait == 0U || prvBlockCurrentTaskOnNotification(pxTCB, xTicksToWait) != htPASS) {
+			if (pulNotificationValue != NULL) {
+				*pulNotificationValue = 0U;
+			}
+			pxTCB->uxNotificationStatus = HT_NOTIFY_NOT_WAITING;
+			htExitCritical();
+			return htFAIL;
+		}
+		htExitCritical();
+		htTaskYield();
+		htEnterCritical();
+	}
+
+	if (pxTCB->uxNotificationStatus != HT_NOTIFY_RECEIVED) {
+		pxTCB->uxNotificationStatus = HT_NOTIFY_NOT_WAITING;
+		if (pulNotificationValue != NULL) {
+			*pulNotificationValue = 0U;
+		}
+		htExitCritical();
+		return htFAIL;
+	}
+
+	if (pulNotificationValue != NULL) {
+		*pulNotificationValue = pxTCB->ulNotifiedValue;
+	}
+	pxTCB->ulNotifiedValue &= ~ulBitsToClearOnExit;
+	pxTCB->uxNotificationStatus = HT_NOTIFY_NOT_WAITING;
+	htExitCritical();
+	return htPASS;
+#else
+	(void)ulBitsToClearOnEntry;
+	(void)ulBitsToClearOnExit;
+	(void)pulNotificationValue;
+	(void)xTicksToWait;
+	return htFAIL;
+#endif
+}
+
+uint32_t htTaskNotifyTake(BaseType_t xClearCountOnExit, TickType_t xTicksToWait)
+{
+#if configUSE_TASK_NOTIFICATIONS == 1
+	htTCB_t *pxTCB = pxCurrentTCB;
+	if (pxTCB == NULL) {
+		return 0U;
+	}
+
+	htEnterCritical();
+	if (pxTCB->ulNotifiedValue == 0U) {
+		if (xTicksToWait == 0U || prvBlockCurrentTaskOnNotification(pxTCB, xTicksToWait) != htPASS) {
+			pxTCB->uxNotificationStatus = HT_NOTIFY_NOT_WAITING;
+			htExitCritical();
+			return 0U;
+		}
+		htExitCritical();
+		htTaskYield();
+		htEnterCritical();
+	}
+
+	const uint32_t ulReturn = pxTCB->ulNotifiedValue;
+	if (ulReturn != 0U) {
+		if (xClearCountOnExit != htFALSE) {
+			pxTCB->ulNotifiedValue = 0U;
+		} else {
+			pxTCB->ulNotifiedValue--;
+		}
+	}
+	pxTCB->uxNotificationStatus = HT_NOTIFY_NOT_WAITING;
+	htExitCritical();
+	return ulReturn;
+#else
+	(void)xClearCountOnExit;
+	(void)xTicksToWait;
+	return 0U;
+#endif
 }
 
 TaskHandle_t htTaskGetCurrentTaskHandle(void)
@@ -654,8 +868,11 @@ void htTaskDelete(TaskHandle_t xTaskToDelete)
 	}
 
 	/* 非当前任务已不再执行，可以立即释放。 */
-	htPortFree(pxTCB->pxStack);
-	htPortFree(pxTCB);
+	pxTCB->uxTaskState = HT_TASK_SUSPENDED;
+	if (pxTCB->ucStaticallyAllocated == 0U) {
+		htPortFree(pxTCB->pxStack);
+		htPortFree(pxTCB);
+	}
 }
 
 /* */

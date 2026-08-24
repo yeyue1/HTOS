@@ -10,12 +10,16 @@ typedef QueueHandle_t SemaphoreHandle_t;
 
 /* 二值信号量创建函数 */
 SemaphoreHandle_t htSemaphoreCreateBinary(void);
+SemaphoreHandle_t htSemaphoreCreateBinaryStatic(htQUEUE_t *pxQueueBuffer);
 
 /* 计数信号量创建函数 */
 SemaphoreHandle_t htSemaphoreCreateCounting(UBaseType_t uxMaxCount, UBaseType_t uxInitialCount);
+SemaphoreHandle_t htSemaphoreCreateCountingStatic(
+		UBaseType_t uxMaxCount, UBaseType_t uxInitialCount, htQUEUE_t *pxQueueBuffer);
 
 /* 互斥量创建函数 */
 SemaphoreHandle_t htSemaphoreCreateMutex(void);
+SemaphoreHandle_t htSemaphoreCreateMutexStatic(htQUEUE_t *pxQueueBuffer);
 SemaphoreHandle_t htSemaphoreCreateRecursiveMutex(void);
 
 /* 信号量删除函数 */

@@ -43,6 +43,7 @@ typedef struct htQueueDefinition {
 
 	volatile int8_t cRxLock; /* 队列接收锁 */
 	volatile int8_t cTxLock; /* 队列发送锁 */
+	uint8_t ucStaticallyAllocated; /* 控制块和存储区由调用方提供 */
 
 } htQUEUE_t;
 
@@ -55,6 +56,8 @@ typedef htQUEUE_t *QueueHandle_t;
 
 /* API函数原型 */
 QueueHandle_t htQueueCreate(UBaseType_t uxQueueLength, UBaseType_t uxItemSize);
+QueueHandle_t htQueueCreateStatic(
+		UBaseType_t uxQueueLength, UBaseType_t uxItemSize, uint8_t *pucQueueStorage, htQUEUE_t *pxQueueBuffer);
 void htQueueDelete(QueueHandle_t xQueue);
 
 BaseType_t htQueueSend(QueueHandle_t xQueue, const void *pvItemToQueue, TickType_t xTicksToWait);
