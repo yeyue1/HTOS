@@ -1,5 +1,46 @@
+# ---- Host test artefacts (pre-existing entries, keep) ----
 tests/*.out
 tests/*.pdb
 tests/test_results.txt
 tests/__pycache__/
 .codex/build_logs/
+
+# ---- Firmware build output ----------------------------------------------
+# Everything CMake/Ninja produces lives under build/ (board-check, debug,
+# release, host-verify ...). /build*/ also catches sibling scratch dirs.
+build/
+/build*/
+
+# ---- Firmware binaries / link products ----
+*.elf
+*.bin
+*.hex
+*.map
+*.srec
+*.ihex
+
+# ---- Object files & toolchain intermediates ----
+*.o
+*.obj
+*.d
+*.su
+*.dmp
+*.lst
+
+# ---- CMake / Ninja generated files (out-of-tree builds only, but be safe) ----
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+.ninja_deps
+.ninja_log
+*.ninja
+
+# ---- Local tooling: 12 skills, NEVER commit ------------------------------
+.dsh/
+
+# ---- Editor / OS noise ----
+*.swp
+*~
+.DS_Store
+Thumbs.db
