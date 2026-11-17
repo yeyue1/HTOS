@@ -150,12 +150,19 @@ void htSchedulerTickHandler(void)
  */
 void htEnterCritical(void)
 {
-	/* 增加嵌套计数 */
-	uxCriticalNesting++;
-
-	/* 禁用中断 - 实际实现将使用Cortex-M的PRIMASK或BASEPRI寄存器 */
-	/* 这里简化处理，实际需要根据目标MCU具体实现 */
+	/*
+	 * 必须先关中断、再增加嵌套计数。
+	 *
+	 * 反过来的顺序会留下一个可抢占窗口：计数已经加一，但 PRIMASK 仍为 0。
+	 * 若 SysTick/PendSV 恰好落在这一瞬间，上下文会带着"多出来的一层嵌套"
+	 * 切走；此后该任务 htExitCritical() 只把计数减到 1，永远走不到
+	 * cpsie i，PRIMASK 就永久停在 1，整个系统死锁。
+	 *
+	 * 压测复现：7 个同优先级任务 + 时间片轮转（每 tick 置位 PendSV）下，
+	 * 默认配置必然在数秒内死锁；把顺序改为先 cpsid 后计数即消失。
+	 */
 	__asm volatile("cpsid i");
+	uxCriticalNesting++;
 }
 
 /**
