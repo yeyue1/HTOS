@@ -89,6 +89,13 @@ void htStartScheduler(void)
 	// 更新系统状态
 	xSchedulerState = HT_SCHEDULER_RUNNING;
 
+	/* 必须先按优先级选出真正的第一个任务：htTaskCreate() 只在创建第一个任务时
+	   顺便把 pxCurrentTCB 赋成它，之后创建的高优先级任务不会回填。若此时直接启动，
+	   实际运行的是"最先创建的任务"，却与 PendSV 里保存 SP 用的 pxCurrentTCB
+	   不是同一个对象，会把这个任务的栈指针写进另一个 TCB，造成栈交叉污染
+	   （实板现象：HardFault + CFSR=INVPC）。 */
+	htTaskSwitchContext();
+
 	// 启动第一个任务
 	vPortStartFirstTask();
 }
@@ -266,6 +273,19 @@ void htSchedulerResume(void)
 BaseType_t htSchedulerNeedsSwitch(void)
 {
 	BaseType_t xSwitchRequired = htFALSE;
+
+	/*
+	 * 调度器尚未运行之前绝不请求上下文切换。
+	 *
+	 * board_clock_init() 里的 HAL_Init() 一开机就使能了 SysTick，而第一个任务
+	 * 创建完成后 pxCurrentTCB 已经非空，二者叠加会在"任务已建好、第一个任务
+	 * 上下文还没建立"之间开出一个窗口：此时若置位 PendSV，PendSV 会在
+	 * PSP 仍为 0 的情况下执行保存动作，把 r4-r11 写到 0xFFFFFFE0，直接进
+	 * HardFault。滴答计数照常累加，只是暂不请求切换。
+	 */
+	if (xSchedulerState != HT_SCHEDULER_RUNNING) {
+		return htFALSE;
+	}
 
 	/* 检查是否有高优先级任务就绪 */
 	if (pxCurrentTCB != NULL) {
