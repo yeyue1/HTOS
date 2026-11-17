@@ -261,6 +261,17 @@ static void htprvIdleTask(void *pvParameters)
 	for (;;) {
 		prvDeleteTerminatedTasks();
 
+		/*
+		 * 协作式调度下必须显式让出。
+		 *
+		 * 抢占关闭后，就绪任务把当前任务叫醒的路径只剩"对方主动 yield"。
+		 * 空闲任务优先级最低，总在无人可跑时才执行；若不在此让出，一个
+		 * 因延时到期而就绪的高优先级任务将永远等不到 CPU。
+		 */
+#if (configUSE_PREEMPTION == 0)
+		htTaskYield();
+#endif
+
 		/* 执行低功耗管理，可选择进入睡眠模式 */
 #if configUSE_IDLE_HOOK
 		/* 如果定义了空闲钩子函数，调用它 */
