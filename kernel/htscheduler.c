@@ -298,6 +298,19 @@ BaseType_t htSchedulerNeedsSwitch(void)
 				break;
 			}
 		}
+
+#if (configUSE_TIME_SLICING == 1)
+		/*
+		 * 时间片轮转：同优先级存在兄弟任务时同样要请求切换。
+		 *
+		 * 只判断"更高优先级"会让同优先级的多任务退化为严格先来先服务——先创建的
+		 * 那个除非自己阻塞，否则后创建者永远拿不到 CPU。htTaskSwitchContext()
+		 * 本来就会推进 pxList->pxIndex 完成列表内轮转，缺的只是这个触发条件。
+		 */
+		if (xSwitchRequired == htFALSE && htListGetCurrentNumberOfItems(&(pxReadyTasksLists[uxCurrentPriority])) > 1U) {
+			xSwitchRequired = htTRUE;
+		}
+#endif
 	}
 
 	return xSwitchRequired;
