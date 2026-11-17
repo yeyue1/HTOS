@@ -287,7 +287,15 @@ BaseType_t htSchedulerNeedsSwitch(void)
 		return htFALSE;
 	}
 
-	/* 检查是否有高优先级任务就绪 */
+	/*
+	 * 滴答本身只在抢占式模式下触发切换。
+	 *
+	 * configUSE_PREEMPTION == 0 时这里是协作式调度：一个任务跑到主动让出
+	 * （htTaskDelay/阻塞/htTaskYield）为止才换人，滴答不再横插一脚。让出
+	 * 动作走 htTaskYield() 直接置位 PendSV，与本函数无关，所以关闭抢占
+	 * 不会导致"永远不切换"。空闲任务另需主动 yield，见 htprvIdleTask()。
+	 */
+#if (configUSE_PREEMPTION == 1)
 	if (pxCurrentTCB != NULL) {
 		UBaseType_t uxCurrentPriority = pxCurrentTCB->uxPriority;
 
@@ -312,6 +320,7 @@ BaseType_t htSchedulerNeedsSwitch(void)
 		}
 #endif
 	}
+#endif /* configUSE_PREEMPTION */
 
 	return xSwitchRequired;
 }
