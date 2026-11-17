@@ -732,11 +732,6 @@ void htTaskYield(void)
 	//    __asm volatile ("isb");
 }
 
-htList_t htTaskGetAllTaskInfo(void)
-{
-	return pxAllocatedTasksList;
-}
-
 /**
  * Check and update delayed task list - fixed implementation for accurate timing
  */

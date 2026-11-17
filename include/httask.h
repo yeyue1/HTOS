@@ -87,8 +87,6 @@ void htTaskTickInc(void);
 /* 任务调度相关函数声明 */
 void htTaskYield(void);
 void htTaskSwitchContext(void);
-// 获取所有任务信息
-htList_t htTaskGetAllTaskInfo(void);
 /* 空闲任务相关函数声明 */
 BaseType_t htprvCreateIdleTask(void);
 
