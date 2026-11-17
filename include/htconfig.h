@@ -37,4 +37,40 @@
 /* 空闲任务配置 */
 #define configDEBUG_IDLE_STATS 0 /* 启用空闲任务状态打印 */
 
+/*
+ * 配置审计
+ *
+ * 下面这些开关在加入本注释时还没有任何 #if 引用它们：无论设成 0 还是 1，
+ * 生成的固件都完全一样。配置项静默失效比缺少该功能更难排查——使用者会以为
+ * 自己已经关掉了某项功能去省 Flash，或者以为打开了某个钩子。这里让它们在
+ * 编译期直接失败，把"没有实现"变成一条明确的编译错误。
+ *
+ * 实现其中某项后，把对应的 #if 删掉即可。
+ */
+#if (configUSE_QUEUE_SETS != 0)
+#error "configUSE_QUEUE_SETS: queue sets are not implemented"
+#endif
+
+#if (configGENERATE_RUN_TIME_STATS != 0)
+#error "configGENERATE_RUN_TIME_STATS: runtime stats are stubs, htGetCPUUsage() returns 0"
+#endif
+
+#if (configUSE_STATS_FORMATTING_FUNCTIONS != 0)
+#error "configUSE_STATS_FORMATTING_FUNCTIONS: needs runtime stats, which are not implemented"
+#endif
+
+#if (configUSE_TICK_HOOK != 0)
+#error "configUSE_TICK_HOOK: the hook is never called"
+#endif
+
+#if (configUSE_MALLOC_FAILED_HOOK != 0)
+#error "configUSE_MALLOC_FAILED_HOOK: the hook is never called"
+#endif
+
+/*
+ * 已实现但尚未用 #if 包裹的开关：功能可用，但把它们设为 0 不会裁掉任何代码。
+ * configUSE_TRACE_FACILITY 同理，它当前不控制任何实现。
+ */
+/* configUSE_MUTEXES, configUSE_COUNTING_SEMAPHORES, configUSE_TRACE_FACILITY */
+
 #endif /* HT_CONFIG_H */
