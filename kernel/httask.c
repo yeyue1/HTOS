@@ -64,6 +64,20 @@ void prvInitialiseTaskLists(void)
 }
 
 /**
+ * 任务函数返回后的最终归宿。
+ *
+ * 任务函数禁止返回；一旦返回，bx lr 必须落到一条永久停机指令上。若把 LR 设为
+ * 0xFFFFFFFE 这类非法地址，Cortex-M3 只会报 HardFault，CFSR 的 UFSR 段给出
+ * 0x00040000（INVPC，非法 PC 装载），现象离原因很远，极难定位。
+ */
+static void prvTaskExitTrap(void)
+{
+	__disable_irq();
+	for (;;) {
+	}
+}
+
+/**
  * 初始化任务栈
  */
 static StackType_t *prvInitialiseTaskStack(StackType_t *pxTopOfStack, TaskFunction_t pxCode, void *pvParameters)
@@ -73,8 +87,11 @@ static StackType_t *prvInitialiseTaskStack(StackType_t *pxTopOfStack, TaskFuncti
 
 	// 构建异常框架 - 从底向上
 	*(--pxTopOfStack) = 0x01000000; /* xPSR - T位置位 */
-	*(--pxTopOfStack) = ((uint32_t)pxCode) | 1UL; /* PC指向任务函数，强制设置LSB确保Thumb模式 */
-	*(--pxTopOfStack) = 0xFFFFFFFEUL; /* LR - 异常返回标记 */
+	/* PC 槽由硬件异常返回装载：必须存偶数地址（bit0=0）。Thumb 状态由同一帧中
+	   xPSR 的 T 位给出，把 bit0 置 1 反而会让返回失败：Cortex-M3 报 INVPC
+	   （非法 PC 装载）。FreeRTOS 的 portSTART_ADDRESS_MASK 做的正是这件事。 */
+	*(--pxTopOfStack) = ((uint32_t)(uintptr_t)pxCode) & ~(uint32_t)0x1U;
+	*(--pxTopOfStack) = (uint32_t)(uintptr_t)prvTaskExitTrap; /* LR - 任务返回即停机 */
 	*(--pxTopOfStack) = 0; /* R12 */
 	*(--pxTopOfStack) = 0; /* R3 */
 	*(--pxTopOfStack) = 0; /* R2 */
