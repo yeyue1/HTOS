@@ -240,6 +240,9 @@ static void prv_console_tx(const char *text, uint32_t length)
 	   last stop bit has left the shift register, so releasing here is safe. */
 	HAL_GPIO_WritePin(BOARD_CONSOLE_DE_GPIO_PORT, BOARD_CONSOLE_DE_PIN, GPIO_PIN_SET);
 
+	/* Retry only while the peripheral is still busy, i.e. before the first byte
+	   was queued: re-sending a chunk that already started shifting bytes out
+	   would duplicate its prefix on the wire. See the note in board.h. */
 	for (attempt = 0U; attempt < BOARD_CONSOLE_TX_RETRIES; attempt++) {
 		if (HAL_UART_Transmit(&s_console, (const uint8_t *)text, (uint16_t)length, BOARD_CONSOLE_TX_TIMEOUT_MS) !=
 				HAL_BUSY) {

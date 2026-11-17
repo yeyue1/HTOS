@@ -31,8 +31,18 @@ extern "C" {
 /* Console (USART3 over RS485)                                                */
 /* -------------------------------------------------------------------------- */
 #define BOARD_CONSOLE_BAUDRATE        9600U   /*!< 8N1, no flow control          */
-#define BOARD_CONSOLE_TX_TIMEOUT_MS   100U    /*!< per-chunk blocking TX timeout */
-#define BOARD_CONSOLE_TX_RETRIES      3U      /*!< retries if the UART is busy   */
+/* A blocking polled TX needs a budget far larger than the raw wire time. At
+   9600 8N1 one byte takes ~1.04 ms, so a 116-byte line occupies ~121 ms of wire
+   time on an idle CPU - and a low-priority writer can additionally be preempted
+   for hundreds of milliseconds while it polls.  100 ms was measurably too small:
+   on hardware a 62-byte line came out truncated at ~46 bytes under load, and the
+   tail (including CRLF) was lost because prv_console_tx() only retried HAL_BUSY
+   and HAL_TIMEOUT ended the chunk silently.  Budget 10x the worst documented line.
+   NOTE: a timed-out chunk must NOT be retried from its start - HAL_UART_Transmit()
+   does not report how many bytes already left the shift register, so re-sending
+   duplicates the prefix.  Only HAL_BUSY (nothing queued yet) is safe to retry. */
+#define BOARD_CONSOLE_TX_TIMEOUT_MS   1000U   /*!< per-chunk blocking TX timeout */
+#define BOARD_CONSOLE_TX_RETRIES      3U      /*!< retries while the UART is busy */
 
 /**
   * @brief  Bring up the 72 MHz clock tree (HSE 8 MHz -> PLL x9) and the 1 kHz
