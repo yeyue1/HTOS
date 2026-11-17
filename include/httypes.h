@@ -16,9 +16,6 @@ typedef uint32_t TickType_t;
 typedef void *TaskHandle_t;
 typedef uint32_t StackType_t;
 
-/* 定时器回调函数类型 */
-typedef void (*htTimerCallback_t)(void);
-
 /* 常量定义 */
 #define htPASS 0
 #define htFAIL -1
