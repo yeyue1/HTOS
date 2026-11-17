@@ -37,6 +37,23 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 - 新建任务栈使用 `0xA5A5A5A5` 涂色，`htGetTaskStackHighWaterMark()` 返回历史最小剩余栈，单位为 word。
 - 可选 MCoreDump 和 Letter Shell 目录保留在 `Trace/` 和 `lettershell/`。
 
+### 临界区与中断
+
+- 临界区用 PRIMASK 全屏蔽实现（不是 BASEPRI 分级屏蔽），`uxCriticalNesting` 记录嵌套深度，归零时才恢复中断。
+- `htEnterCritical()` **先关中断、再递增嵌套计数**。反序会留下一个可抢占窗口：计数已加、PRIMASK 仍为 0 时若被 SysTick 抢占，换出的上下文会多带一层嵌套，返回后 `htExitCritical()` 只能把计数减到 1，永远走不到恢复中断的分支，PRIMASK 永久置位而系统**静默死锁**（不触发任何 fault）。
+- 因此临界区必须短小，且不得在临界区内调用可能阻塞的 API。
+
+## 配置开关
+
+`include/htconfig.h` 中的宏并非全部生效。当前**已实现**：`configUSE_PREEMPTION`、
+`configUSE_TIME_SLICING`、`configMAX_PRIORITIES`、`configTOTAL_HEAP_SIZE`、
+`configMINIMAL_STACK_SIZE`、`configUSE_TASK_NOTIFICATIONS`、
+`configUSE_RECURSIVE_MUTEXES`、`configSUPPORT_STATIC_ALLOCATION`、`configUSE_IDLE_HOOK`。
+
+**尚未实现**的开关会在编译期直接 `#error` 中止，而不是静默忽略：`configUSE_QUEUE_SETS`、
+`configGENERATE_RUN_TIME_STATS`、`configUSE_STATS_FORMATTING_FUNCTIONS`、
+`configUSE_TICK_HOOK`、`configUSE_MALLOC_FAILED_HOOK`。
+
 ## 快速上手
 
 ```c
@@ -178,6 +195,10 @@ HTOS/
 - 软件定时器、事件组和看门狗服务尚未实现。软件定时器应在专用服务任务、命令队列和回调上下文约束明确后再加入。
 - `htGetCPUUsage()`、`htGetIdleRunTimePercent()` 和 `htGetRunTimeCounter()` 暂未接入硬件运行时计数器。
 - 栈高水位是涂色扫描的历史估计；量产版还应增加 MPU/PSPLIM（如芯片支持）、栈溢出钩子和故障注入测试。
+- 已在 STM32F103C8T6（Cortex-M3，72 MHz，64 KB Flash / 20 KB SRAM）实板上完成 60 秒混合压测：
+  8 个同优先级任务并发执行队列收发、互斥量与优先级继承、计数信号量、递归互斥量、任务通知、
+  堆分配回收与运行期建删任务，合计 451 万次迭代、218 万次断言零失败，空闲堆与任务数无漂移。
+  压测固件依赖板级工程，未随内核仓库发布。
 
 ## License
 
