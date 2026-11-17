@@ -18,6 +18,16 @@
 #endif
 
 /*
+ * The CMSIS core header refers to IRQn_Type and SCB, which are supplied by the
+ * device header.  Including the device header first keeps the port buildable on
+ * a real target instead of only against the host stubs.  Override this when the
+ * board uses a different STM32 family.
+ */
+#ifndef HT_PORT_DEVICE_HEADER
+#define HT_PORT_DEVICE_HEADER "stm32f1xx.h"
+#endif
+
+/*
  * Stack-range checks are optional because SRAM placement is a linker-script
  * property, not an RTOS invariant.  Enable them per target and provide
  * assembler-compatible integer constants when a cheap guard is desired:

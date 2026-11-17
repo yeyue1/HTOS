@@ -5,6 +5,8 @@
 
 #include "htPort.h"
 #include "httask.h"
+/* The device header defines IRQn_Type/SCB and pulls the CMSIS core header in. */
+#include HT_PORT_DEVICE_HEADER
 #include HT_PORT_CORE_HEADER
 
 #include <stdint.h>
@@ -95,6 +97,13 @@ __attribute__((naked, used, noinline)) void PendSV_Handler(void)
 				   "ldr r3, =pxCurrentTCB\n"
 				   "ldr r2, [r3]\n"
 				   "cbz r2, 1f\n"
+				   /*
+				    * PSP == 0 意味着还没有任何任务上下文：第一个任务尚未通过
+				    * SVC_Handler 建立。此时既没有可保存的现场，也没有可恢复的
+				    * 现场，直接返回（保留原始 EXC_RETURN，不改 SPSEL）。
+				    * 若省掉这个判断，stmdb 会写 0xFFFFFFE0 并触发 HardFault。
+				    */
+				   "cbz r0, 9f\n"
 #if HT_PORT_VALIDATE_STACK
 			HT_PORT_STACK_CHECK_R0
 #endif
@@ -119,6 +128,11 @@ __attribute__((naked, used, noinline)) void PendSV_Handler(void)
 				   "cpsie i\n"
 				   "movs r0, #0x0D\n"
 				   "orr lr, lr, r0\n"
+				   "bx lr\n"
+				   /* 9: 无任务上下文时的提前返回 - 必须原样返回 EXC_RETURN，
+				      不能用上面的 orr 强制回到 Thread/PSP（PSP 此时是 0）。 */
+				   "9:\n"
+				   "cpsie i\n"
 				   "bx lr\n"
 #if HT_PORT_VALIDATE_STACK
 				   "PendSV_StackError:\n"
