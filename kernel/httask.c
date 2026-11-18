@@ -328,6 +328,47 @@ BaseType_t htprvCreateIdleTask(void)
 	return xReturn;
 }
 
+#if (configCHECK_FOR_STACK_OVERFLOW > 0)
+/**
+ * 栈溢出钩子：弱符号，默认停机。
+ *
+ * 继续运行只会写坏相邻内存，让故障离现场越来越远；停机能让调试器
+ * 直接停在写崩栈的那个任务上。应用提供同名强符号即可接管。
+ */
+__attribute__((weak)) void htStackOverflowHook(TaskHandle_t xTask, const char *pcTaskName)
+{
+	(void)xTask;
+	(void)pcTaskName;
+	for (;;) {
+		/* 停机 */
+	}
+}
+
+/**
+ * 检查一个任务是否写穿了自己的栈。
+ *
+ * 栈底 4 个字在创建任务时被填成 htTASK_STACK_FILL_VALUE，正常执行不会碰到；
+ * 只要它们变了，就是栈指针已经越过边界。只查 4 个字是为了让
+ * 开销恒定在几个周期，可以留在每次任务切换里。
+ *
+ * @param xTask 要检查的任务，NULL 表示当前任务
+ */
+void htTaskCheckStackSentinel(TaskHandle_t xTask)
+{
+	htTCB_t *pxTCB = (xTask == NULL) ? pxCurrentTCB : (htTCB_t *)xTask;
+	if (pxTCB == NULL || pxTCB->pxStack == NULL || pxTCB->uxStackDepth < 4U) {
+		return;
+	}
+
+	for (UBaseType_t uxIndex = 0U; uxIndex < 4U; uxIndex++) {
+		if (pxTCB->pxStack[uxIndex] != htTASK_STACK_FILL_VALUE) {
+			htStackOverflowHook((TaskHandle_t)pxTCB, pxTCB->pcTaskName);
+			return;
+		}
+	}
+}
+#endif /* configCHECK_FOR_STACK_OVERFLOW */
+
 /**
  * Task delay function - optimized implementation
  */
