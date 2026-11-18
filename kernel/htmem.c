@@ -749,7 +749,23 @@ void htPortFree(void *ptr)
 		return;
 	}
 
-	/* 记录原始块大小（释放前的已分配块大小） */
+	/*
+	 * 物理前驱一致性检查：真实块的 prev_phys_block 要么是 NULL（堆内首块），
+	 * 要么满足 prev + size(prev) == block。堆内的野指针（任务栈或数据缓冲区
+	 * 里的随机字节）几乎不可能满足该不变式，于是在进入空闲链表之前就被拒绝；
+	 * 否则这些字节会被当成块头插进空闲链表，下一次 malloc 就把活跃内存发出去。
+	 */
+	const block_header_t *prev = block->prev_phys_block;
+	if (prev == NULL) {
+		if ((char *)block != (char *)tlsf_align_up((size_t)g_tlsf_heap, TLSF_ALIGN_SIZE)) {
+			htExitCritical();
+			return;
+		}
+	} else if (!tlsf_block_within_heap(prev) ||
+			   (char *)tlsf_offset_to_block(prev, tlsf_block_size(prev)) != (char *)block) {
+		htExitCritical();
+		return;
+	}
 
 	/* 标记当前块为空闲 */
 	tlsf_block_mark_as_free(block);
