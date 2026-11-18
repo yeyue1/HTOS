@@ -48,7 +48,8 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 `include/htconfig.h` 中的宏并非全部生效。当前**已实现**：`configUSE_PREEMPTION`、
 `configUSE_TIME_SLICING`、`configMAX_PRIORITIES`、`configTOTAL_HEAP_SIZE`、
 `configMINIMAL_STACK_SIZE`、`configUSE_TASK_NOTIFICATIONS`、
-`configUSE_RECURSIVE_MUTEXES`、`configSUPPORT_STATIC_ALLOCATION`、`configUSE_IDLE_HOOK`。
+`configUSE_RECURSIVE_MUTEXES`、`configSUPPORT_STATIC_ALLOCATION`、`configUSE_IDLE_HOOK`、
+`configCHECK_FOR_STACK_OVERFLOW`。
 
 **尚未实现**的开关会在编译期直接 `#error` 中止，而不是静默忽略：`configUSE_QUEUE_SETS`、
 `configGENERATE_RUN_TIME_STATS`、`configUSE_STATS_FORMATTING_FUNCTIONS`、
@@ -108,6 +109,25 @@ if (remaining_words < 32U) {
 }
 ```
 
+### 栈溢出检测
+
+打开 `configCHECK_FOR_STACK_OVERFLOW` 后，内核在每次任务切换时检查被换下任务的栈底 4 个字是否仍为填充值 `0xA5A5A5A5`：
+
+```c
+void htStackOverflowHook(TaskHandle_t xTask, const char *pcTaskName)
+{
+	/* 记录任务名并停机；继续运行只会写坏相邻内存 */
+	(void)xTask;
+	board_console_write(pcTaskName);
+	for (;;) {
+	}
+}
+```
+
+该钩子默认是弱符号的死循环，不覆盖也能安全停机。代价是每次切换多 4 次比较（本工程 text +76 B、bss 不变）。只查栈底 4 个字意味着它能发现“写穿栈边界”，但发现不了恰好落在栈内的越界写——后者仍需调试器或静态分析。
+
+实测三个任务的栈余量都很充裕（blink 22/128、logger 69/192、idle 23/128 字）。故障注入（128 字栈里放 512 B 局部数组）时，该钩子在实板上准确报出 `task=hog` 并停机。
+
 ### 用任务通知代替单元素队列
 
 任务通知直接存放在目标任务的 TCB 中，适合事件位、轻量计数器和“一对一”唤醒：
@@ -155,7 +175,7 @@ python tests/run_tests.py --build --cc clang
 python tests/run_tests.py --clean
 ```
 
-也可在 `tests/` 目录使用 `make test`。当前主机套件包含 247 个断言，覆盖列表、TLSF 堆、队列/信号量、任务通知、静态对象、递归互斥量、有限超时、tick 回绕、任务状态转换、队列覆盖和栈高水位。
+也可在 `tests/` 目录使用 `make test`。当前主机套件包含 253 个断言，覆盖列表、TLSF 堆、队列/信号量、任务通知、静态对象、递归互斥量、有限超时、tick 回绕、任务状态转换、队列覆盖、栈高水位和栈溢出哨兵。
 
 统一构建入口在 `codex_build.toml`：
 
@@ -198,7 +218,7 @@ HTOS/
 - 静态分配目前覆盖任务、通用队列、二值/计数信号量和普通互斥令牌；递归互斥量仍通过动态创建接口构造。
 - 软件定时器、事件组和看门狗服务尚未实现。软件定时器应在专用服务任务、命令队列和回调上下文约束明确后再加入。
 - `htGetCPUUsage()`、`htGetIdleRunTimePercent()` 和 `htGetRunTimeCounter()` 暂未接入硬件运行时计数器。
-- 栈高水位是涂色扫描的历史估计；量产版还应增加 MPU/PSPLIM（如芯片支持）、栈溢出钩子和故障注入测试。
+- 栈高水位是涂色扫描的历史估计；`configCHECK_FOR_STACK_OVERFLOW` 只能发现写穿栈边界的溢出（只比较栈底 4 个字），栈内的越界写仍需调试器或静态分析；STM32F103 无 MPU/PSPLIM，不能用硬件做栈与内存隔离。
 - 已在 STM32F103C8T6（Cortex-M3，72 MHz，64 KB Flash / 20 KB SRAM）实板上完成两轮压测：
   第一轮 60 秒混合负载（队列、互斥量与优先级继承、计数信号量、递归互斥量、任务通知、堆分配回收、
   运行期建删任务），451 万次迭代、218 万次断言零失败；第二轮 180 秒覆盖 tick 回绕、

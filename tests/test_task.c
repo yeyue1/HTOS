@@ -12,6 +12,25 @@ static UBaseType_t free_count;
 static UBaseType_t allocation_count;
 static TickType_t ticks_advanced_on_yield;
 
+#if (configCHECK_FOR_STACK_OVERFLOW > 0)
+/* 强符号：接管内核的弱符号默认停机，让测试能断言钩子被调用。 */
+static UBaseType_t overflow_calls;
+static TaskHandle_t overflowing_task;
+static char overflowing_name[configMAX_TASK_NAME_LEN];
+
+void htStackOverflowHook(TaskHandle_t xTask, const char *pcTaskName)
+{
+	size_t length = 0U;
+	overflow_calls++;
+	overflowing_task = xTask;
+	while (length < (sizeof(overflowing_name) - 1U) && pcTaskName[length] != '\0') {
+		overflowing_name[length] = pcTaskName[length];
+		length++;
+	}
+	overflowing_name[length] = '\0';
+}
+#endif
+
 extern void prvInitialiseTaskLists(void);
 extern void htTaskCheckDelayedTasks(void);
 
@@ -365,6 +384,76 @@ static void test_delete_non_current_task_releases_stack_and_tcb(void)
 	TEST_ASSERT_EQUAL(1, htListGetCurrentNumberOfItems(&pxAllocatedTasksList));
 }
 
+#if (configCHECK_FOR_STACK_OVERFLOW > 0)
+static void reset_overflow_recorder(void)
+{
+	overflow_calls = 0U;
+	overflowing_task = NULL;
+	overflowing_name[0] = '\0';
+}
+
+static void test_stack_sentinel_accepts_an_intact_stack(void)
+{
+	htTCB_t task;
+	StackType_t stack[8];
+	memset(&task, 0, sizeof(task));
+	for (UBaseType_t index = 0U; index < 8U; index++) {
+		stack[index] = htTASK_STACK_FILL_VALUE;
+	}
+	task.pxStack = stack;
+	task.uxStackDepth = 8U;
+	reset_overflow_recorder();
+
+	htTaskCheckStackSentinel(&task);
+
+	TEST_ASSERT_EQUAL(0, (int)overflow_calls);
+	TEST_ASSERT_NULL(overflowing_task);
+}
+
+static void test_stack_sentinel_reports_a_corrupted_stack(void)
+{
+	htTCB_t task;
+	StackType_t stack[8];
+	memset(&task, 0, sizeof(task));
+	for (UBaseType_t index = 0U; index < 8U; index++) {
+		stack[index] = htTASK_STACK_FILL_VALUE;
+	}
+	memcpy(task.pcTaskName, "overflow", 9U);
+	task.pxStack = stack;
+	task.uxStackDepth = 8U;
+	stack[0] = 0xDEADBEEFU; /* 栈底被写掉一个字 */
+	reset_overflow_recorder();
+
+	htTaskCheckStackSentinel(&task);
+
+	TEST_ASSERT_EQUAL(1, (int)overflow_calls);
+	TEST_ASSERT(overflowing_task == &task);
+	TEST_ASSERT(strcmp(overflowing_name, "overflow") == 0);
+}
+
+static void test_stack_sentinel_skips_tasks_without_usable_storage(void)
+{
+	htTCB_t task;
+	StackType_t stack[8];
+	for (UBaseType_t index = 0U; index < 8U; index++) {
+		stack[index] = htTASK_STACK_FILL_VALUE;
+	}
+	stack[0] = 0U;
+	reset_overflow_recorder();
+
+	memset(&task, 0, sizeof(task));
+	htTaskCheckStackSentinel(&task); /* pxStack == NULL */
+	task.pxStack = stack;
+	task.uxStackDepth = 3U; /* 太短，不能检查 */
+	htTaskCheckStackSentinel(&task);
+	pxCurrentTCB = &task; /* NULL 表示当前任务 */
+	task.uxStackDepth = 8U;
+	htTaskCheckStackSentinel(NULL);
+
+	TEST_ASSERT_EQUAL(1, (int)overflow_calls);
+}
+#endif
+
 int main(void)
 {
 	UnityBegin("test_task.c");
@@ -382,5 +471,10 @@ int main(void)
 	RUN_TEST(test_task_notify_from_isr_wakes_higher_priority_waiter);
 	RUN_TEST(test_static_task_uses_caller_memory_and_is_not_freed);
 	RUN_TEST(test_delete_non_current_task_releases_stack_and_tcb);
+#if (configCHECK_FOR_STACK_OVERFLOW > 0)
+	RUN_TEST(test_stack_sentinel_accepts_an_intact_stack);
+	RUN_TEST(test_stack_sentinel_reports_a_corrupted_stack);
+	RUN_TEST(test_stack_sentinel_skips_tasks_without_usable_storage);
+#endif
 	return UnityEnd();
 }
