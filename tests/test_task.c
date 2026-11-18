@@ -454,6 +454,49 @@ static void test_stack_sentinel_skips_tasks_without_usable_storage(void)
 }
 #endif
 
+static void test_notify_actions_set_bits_increment_and_overwrite(void)
+{
+	reset_test_state();
+	htTCB_t current;
+	htTCB_t worker;
+	BaseType_t rc;
+
+	initialise_task(&current, "current", 1U);
+	initialise_task(&worker, "worker", 2U);
+	pxCurrentTCB = &current;
+
+	rc = htTaskNotify(&worker, 0x01U, HT_NOTIFY_SET_BITS);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	rc = htTaskNotify(&worker, 0x04U, HT_NOTIFY_SET_BITS);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(0x05, worker.ulNotifiedValue);
+
+	rc = htTaskNotify(&worker, 0U, HT_NOTIFY_INCREMENT);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(0x06, worker.ulNotifiedValue);
+
+	rc = htTaskNotify(&worker, 0x80U, HT_NOTIFY_SET_VALUE_WITH_OVERWRITE);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(0x80, worker.ulNotifiedValue);
+
+	/* 已有未取走的值时，WITHOUT_OVERWRITE 必须被拒绝且不改写挂起值 */
+	rc = htTaskNotify(&worker, 0x40U, HT_NOTIFY_SET_VALUE_WITHOUT_OVERWRITE);
+	TEST_ASSERT_EQUAL(htFAIL, rc);
+	TEST_ASSERT_EQUAL(0x80, worker.ulNotifiedValue);
+
+	/* 非法 action 被拒绝 */
+	rc = htTaskNotify(&worker, 0x40U, (htNotifyAction_t)(HT_NOTIFY_SET_VALUE_WITHOUT_OVERWRITE + 1));
+	TEST_ASSERT_EQUAL(htFAIL, rc);
+	TEST_ASSERT_EQUAL(0x80, worker.ulNotifiedValue);
+
+	/* INCREMENT 在 UINT32_MAX 处饱和 */
+	worker.ulNotifiedValue = UINT32_MAX;
+	rc = htTaskNotify(&worker, 0U, HT_NOTIFY_INCREMENT);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(UINT32_MAX, worker.ulNotifiedValue);
+
+	TEST_ASSERT_EQUAL(0, critical_nesting);
+}
 int main(void)
 {
 	UnityBegin("test_task.c");
@@ -476,5 +519,6 @@ int main(void)
 	RUN_TEST(test_stack_sentinel_reports_a_corrupted_stack);
 	RUN_TEST(test_stack_sentinel_skips_tasks_without_usable_storage);
 #endif
+	RUN_TEST(test_notify_actions_set_bits_increment_and_overwrite);
 	return UnityEnd();
 }
