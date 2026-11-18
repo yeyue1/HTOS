@@ -392,6 +392,153 @@ static void test_static_counting_semaphore_and_mutex_use_no_heap(void)
 	TEST_ASSERT_NULL(htSemaphoreCreateCountingStatic(2U, 3U, &counting_buffer));
 }
 
+/* 把任务手工挂到队列等待链表中，模拟它已经阻塞（队列等待表存的是 xEventListItem）。 */
+static void block_task_on(htList_t *list, htTCB_t *task, UBaseType_t priority)
+{
+	memset(task, 0, sizeof(*task));
+	htListItemInit(&(task->xStateListItem));
+	htListItemInit(&(task->xEventListItem));
+	htListSetItemOwner(&(task->xEventListItem), task);
+	task->uxPriority = priority;
+	task->uxBasePriority = priority;
+	task->uxTaskState = HT_TASK_BLOCKED;
+	htListInsertEnd(list, &(task->xEventListItem));
+}
+
+static void test_queue_isr_send_wakes_a_higher_priority_receiver(void)
+{
+	reset_test_state();
+	QueueHandle_t queue = htQueueCreate(2U, sizeof(int));
+	htTCB_t current = {0};
+	htTCB_t receiver;
+	int value = 42;
+	BaseType_t woken = htFALSE;
+	BaseType_t rc;
+
+	TEST_ASSERT_NOT_NULL(queue);
+	initialise_current_task(&current, 0U);
+	block_task_on(&queue->xTasksWaitingToReceive, &receiver, 3U);
+
+	rc = htQueueSendFromISR(queue, &value, &woken);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(htTRUE, woken);
+	TEST_ASSERT_EQUAL(1, htQueueMessagesWaiting(queue));
+	TEST_ASSERT_EQUAL(HT_TASK_READY, receiver.uxTaskState);
+	TEST_ASSERT(receiver.xStateListItem.pxContainer == &pxReadyTasksLists[3]);
+	TEST_ASSERT_NULL(receiver.xEventListItem.pxContainer);
+
+	/* 没有阻塞接收者时不应报告唤醒 */
+	woken = htTRUE;
+	rc = htQueueSendFromISR(queue, &value, &woken);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(htFALSE, woken);
+
+	/* 队列满 + NULL 唤醒指针也必须安全失败 */
+	rc = htQueueSendFromISR(queue, &value, NULL);
+	TEST_ASSERT_EQUAL(htFAIL, rc);
+	TEST_ASSERT_EQUAL(2, htQueueMessagesWaiting(queue));
+	htQueueDelete(queue);
+}
+
+static void test_queue_isr_receive_wakes_a_higher_priority_sender(void)
+{
+	reset_test_state();
+	QueueHandle_t queue = htQueueCreate(1U, sizeof(int));
+	htTCB_t current = {0};
+	htTCB_t blocked_sender;
+	int value = 7;
+	int out = 0;
+	BaseType_t woken = htFALSE;
+	BaseType_t rc;
+
+	TEST_ASSERT_NOT_NULL(queue);
+	initialise_current_task(&current, 0U);
+	TEST_ASSERT_EQUAL(htPASS, htQueueSend(queue, &value, 0U) == htPASS ? htPASS : htFAIL);
+	block_task_on(&queue->xTasksWaitingToSend, &blocked_sender, 2U);
+
+	rc = htQueueReceiveFromISR(queue, &out, &woken);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(7, out);
+	TEST_ASSERT_EQUAL(htTRUE, woken);
+	TEST_ASSERT_EQUAL(HT_TASK_READY, blocked_sender.uxTaskState);
+	TEST_ASSERT(blocked_sender.xStateListItem.pxContainer == &pxReadyTasksLists[2]);
+
+	/* 空队列接收必须失败且不报告唤醒 */
+	woken = htTRUE;
+	rc = htQueueReceiveFromISR(queue, &out, &woken);
+	TEST_ASSERT_EQUAL(htFAIL, rc);
+	TEST_ASSERT_EQUAL(htFALSE, woken);
+	htQueueDelete(queue);
+}
+
+static void test_queue_reset_and_peek_keep_the_queue_consistent(void)
+{
+	reset_test_state();
+	QueueHandle_t queue = htQueueCreate(3U, sizeof(int));
+	const int values[3] = {5, 6, 7};
+	int peeked = 0;
+	int received = 0;
+	BaseType_t rc;
+
+	TEST_ASSERT_NOT_NULL(queue);
+	for (UBaseType_t i = 0U; i < 3U; i++) {
+		rc = htQueueSend(queue, &values[i], 0U);
+		TEST_ASSERT_EQUAL(htPASS, rc);
+	}
+	TEST_ASSERT_EQUAL(3, htQueueMessagesWaiting(queue));
+	TEST_ASSERT_EQUAL(0, htQueueSpacesAvailable(queue));
+
+	rc = htQueuePeek(queue, &peeked, 0U);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(5, peeked);
+	TEST_ASSERT_EQUAL(3, htQueueMessagesWaiting(queue));
+
+	rc = htQueueReceive(queue, &received, 0U);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(5, received);
+
+	rc = htQueueReset(queue);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(0, htQueueMessagesWaiting(queue));
+	TEST_ASSERT_EQUAL(3, htQueueSpacesAvailable(queue));
+
+	/* reset 之后队列仍然可用：读写位置从头开始 */
+	rc = htQueueSend(queue, &values[1], 0U);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	rc = htQueueReceive(queue, &received, 0U);
+	TEST_ASSERT_EQUAL(htPASS, rc);
+	TEST_ASSERT_EQUAL(6, received);
+	htQueueDelete(queue);
+}
+
+static void test_delete_releases_dynamic_storage(void)
+{
+	reset_test_state();
+	QueueHandle_t queue = htQueueCreate(2U, sizeof(int));
+	SemaphoreHandle_t counting = htSemaphoreCreateCounting(3U, 1U);
+	size_t frees_before;
+
+	TEST_ASSERT_NOT_NULL(queue);
+	TEST_ASSERT_NOT_NULL(counting);
+	TEST_ASSERT_EQUAL(1, htSemaphoreGetCount(counting));
+	TEST_ASSERT_EQUAL(htPASS, htSemaphoreGive(counting));
+	TEST_ASSERT_EQUAL(2, htSemaphoreGetCount(counting));
+
+	/* 动态队列 = 结构体 + 存储区 两次释放 */
+	frees_before = free_count;
+	htQueueDelete(queue);
+	TEST_ASSERT(free_count == frees_before + 2U);
+
+	/* 信号量只有结构体（itemSize == 0 不分配存储区） */
+	frees_before = free_count;
+	htSemaphoreDelete(counting);
+	TEST_ASSERT(free_count == frees_before + 1U);
+
+	/* 重复删除 NULL 是安全的，且不产生释放 */
+	htQueueDelete(NULL);
+	htSemaphoreDelete(NULL);
+	TEST_ASSERT(free_count == frees_before + 1U);
+}
 int main(void)
 {
 	UnityBegin("test_queue.c");
@@ -409,5 +556,9 @@ int main(void)
 	RUN_TEST(test_static_queue_uses_caller_storage_without_heap_operations);
 	RUN_TEST(test_static_binary_semaphore_needs_no_storage);
 	RUN_TEST(test_static_counting_semaphore_and_mutex_use_no_heap);
+	RUN_TEST(test_queue_isr_send_wakes_a_higher_priority_receiver);
+	RUN_TEST(test_queue_isr_receive_wakes_a_higher_priority_sender);
+	RUN_TEST(test_queue_reset_and_peek_keep_the_queue_consistent);
+	RUN_TEST(test_delete_releases_dynamic_storage);
 	return UnityEnd();
 }
