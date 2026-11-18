@@ -1,3 +1,12 @@
+/**
+ * @file htqueue.h
+ * @brief 队列与计数信号量接口。
+ *
+ * 本文件定义队列控制块 htQUEUE_t 以及队列的一组操作。队列既能搬运数据
+ * （uxItemSize > 0，按字节复制），也能退化成计数信号量（uxItemSize == 0，只累加计数）。
+ * 生产者/消费者之间的同步通过在等待链表 xTasksWaitingToSend / xTasksWaitingToReceive
+ * 上挂起任务实现，超时后由延时表唤醒。
+ */
 #ifndef HT_QUEUE_H
 #define HT_QUEUE_H
 
@@ -5,71 +14,205 @@
 #include "htlist.h"
 #include "httask.h"
 
-/* 队列指针数据结构 */
+/**
+ * @brief 队列读写指针，只在数据队列（uxItemSize > 0）时有效。
+ */
 typedef struct htQueuePointers {
-	int8_t *pcTail; /* 指向队列存储区的尾部 */
-	int8_t *pcReadFrom; /* 指向下一个读取位置 */
+	int8_t *pcTail; /**< 指向队列存储区尾部之后的位置 */
+	int8_t *pcReadFrom; /**< 指向下一个待读取位置 */
 } htQueuePointers_t;
 
-/* 信号量数据结构 */
+/**
+ * @brief 计数信号量数据，只在信号量（uxItemSize == 0）时有效。
+ */
 typedef struct htSemaphoreData {
-	UBaseType_t uxSemaphoreCount; /* 信号量计数值 */
+	UBaseType_t uxSemaphoreCount; /**< 当前信号量计数值 */
 } htSemaphoreData_t;
 
-/* 记录递归互斥量所有者和递归计数的结构 */
+/**
+ * @brief 递归互斥量的持有者信息。
+ *
+ * 递归互斥量把这块结构当作"数据项"存放在队列存储区里，
+ * 记录谁持有、递归了几层、以及为了优先级继承而临时提升前的原始优先级。
+ */
 typedef struct htMutexHolder {
-	htTCB_t *xTaskHandle;
-	UBaseType_t uxRecursiveCallCount;
-	// 用于优先级继承
-	UBaseType_t uxOriginalPriority;
+	htTCB_t *xTaskHandle; /**< 当前持有该互斥量的任务 */
+	UBaseType_t uxRecursiveCallCount; /**< 递归获取次数，归零才真正释放 */
+	/* 用于优先级继承：临时提升前的原始优先级 */
+	UBaseType_t uxOriginalPriority; /**< 未被继承时的原始优先级 */
 } htMutexHolder_t;
 
-/* 队列定义结构 */
+/**
+ * @brief 队列控制块。
+ *
+ * 数据队列与信号量共用同一套结构，靠 uxItemSize 区分：
+ * - uxItemSize > 0：使用 u.xQueue 的读写指针搬运数据；
+ * - uxItemSize == 0：使用 u.xSemaphore 的计数值，只做同步。
+ */
 typedef struct htQueueDefinition {
-	int8_t *pcHead; /* 指向队列存储区开始位置 */
-	int8_t *pcWriteTo; /* 指向下一个写入位置 */
+	int8_t *pcHead; /**< 指向队列存储区起始位置 */
+	int8_t *pcWriteTo; /**< 指向下一个待写入位置 */
 
 	union {
-		htQueuePointers_t xQueue; /* 队列特有数据 */
-		htSemaphoreData_t xSemaphore; /* 信号量特有数据 */
+		htQueuePointers_t xQueue; /**< 队列特有的读写指针 */
+		htSemaphoreData_t xSemaphore; /**< 信号量特有的计数值 */
 	} u;
 
-	htList_t xTasksWaitingToSend; /* 等待发送的任务列表 */
-	htList_t xTasksWaitingToReceive; /* 等待接收的任务列表 */
+	htList_t xTasksWaitingToSend; /**< 因队列满而等待发送的任务链表 */
+	htList_t xTasksWaitingToReceive; /**< 因队列空而等待接收的任务链表 */
 
-	volatile UBaseType_t uxMessagesWaiting; /* 当前队列中的消息数量 */
-	UBaseType_t uxLength; /* 队列长度（项目数量） */
-	UBaseType_t uxItemSize; /* 每个项目的大小（字节） */
+	volatile UBaseType_t uxMessagesWaiting; /**< 当前队列中已有消息数（信号量为计数值） */
+	UBaseType_t uxLength; /**< 队列容量，即可容纳的项目数 */
+	UBaseType_t uxItemSize; /**< 每项字节数，为 0 表示这是信号量 */
 
-	volatile int8_t cRxLock; /* 队列接收锁 */
-	volatile int8_t cTxLock; /* 队列发送锁 */
-	uint8_t ucStaticallyAllocated; /* 控制块和存储区由调用方提供 */
+	volatile int8_t cRxLock; /**< 接收方向的队列锁，与 cTxLock 配合批量唤醒 */
+	volatile int8_t cTxLock; /**< 发送方向的队列锁，与 cRxLock 配合批量唤醒 */
+	uint8_t ucStaticallyAllocated; /**< 非 0 表示控制块与存储区由调用方提供，删除时不释放 */
 
 } htQUEUE_t;
 
-/* 队列句柄类型 */
+/** @brief 队列句柄。 */
 typedef htQUEUE_t *QueueHandle_t;
 
-/* 常量定义 */
+/* ------------------------------------------------------------------ */
+/* 队列锁取值                                                           */
+/* ------------------------------------------------------------------ */
+
+/** @brief 队列未被锁住（默认值）。 */
 #define htQUEUE_UNLOCKED ((int8_t)(-1))
+/** @brief 队列已被锁住，期间不立即唤醒等待任务，解锁时统一唤醒。 */
 #define htQUEUE_LOCKED ((int8_t)(0))
 
-/* API函数原型 */
+/* ------------------------------------------------------------------ */
+/* 队列创建与删除                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief 动态创建一个队列。
+ *
+ * @param[in] uxQueueLength 队列容量，必须大于 0。
+ * @param[in] uxItemSize 每项字节数；为 0 时创建的是计数信号量。
+ * @return 成功返回队列句柄，参数非法（容量为 0 或所需存储区溢出）或内存不足返回 NULL。
+ * @note 存储区与控制块都从 htOS 堆上分配。
+ */
 QueueHandle_t htQueueCreate(UBaseType_t uxQueueLength, UBaseType_t uxItemSize);
+
+/**
+ * @brief 用调用方提供的存储区静态创建一个队列。
+ *
+ * @param[in] uxQueueLength 队列容量，必须大于 0。
+ * @param[in] uxItemSize 每项字节数，为 0 时是计数信号量。
+ * @param[in] pucQueueStorage 数据区，长度至少为 uxQueueLength * uxItemSize 字节。
+ * @param[in] pxQueueBuffer 调用方提供的控制块。
+ * @return 成功返回队列句柄，参数非法返回 NULL。
+ * @note 静态队列删除时不会释放上述内存，生命周期由调用方管理。
+ */
 QueueHandle_t htQueueCreateStatic(
 		UBaseType_t uxQueueLength, UBaseType_t uxItemSize, uint8_t *pucQueueStorage, htQUEUE_t *pxQueueBuffer);
+/**
+ * @brief 删除队列并释放其占用的资源。
+ *
+ * @param[in] xQueue 队列句柄。
+ * @note 动态队列会一并释放存储区；静态队列只清零字段，不释放调用方内存。
+ *       删除前必须保证没有任务还挂在它的等待链表上。
+ */
 void htQueueDelete(QueueHandle_t xQueue);
 
+/* ------------------------------------------------------------------ */
+/* 队列发送                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief 向队列发送一个数据项，队列满时可阻塞等待。
+ *
+ * @param[in] xQueue 队列句柄。
+ * @param[in] pvItemToQueue 待发送数据的指针，数据按 uxItemSize 复制进队列。
+ * @param[in] xTicksToWait 队列满时最长阻塞的 tick 数，传 htBLOCKED_INDEFINITELY 表示永久等待。
+ * @return htPASS(0) 表示成功，htFAIL(-1) 表示超时或参数非法。
+ * @note 在中断里必须改用 htQueueSendFromISR()。
+ */
 BaseType_t htQueueSend(QueueHandle_t xQueue, const void *pvItemToQueue, TickType_t xTicksToWait);
+
+/**
+ * @brief 中断上下文里向队列发送一个数据项，不阻塞。
+ *
+ * @param[in] xQueue 队列句柄。
+ * @param[in] pvItemToQueue 待发送数据的指针。
+ * @param[out] pxHigherPriorityTaskWoken 若唤醒的任务优先级高于当前任务，会被写为 htTRUE。
+ * @return htPASS(0) 表示成功，htFAIL(-1) 表示队列已满。
+ * @note 调用本函数前应先将其置为 htFALSE，返回后据其值决定是否触发一次切换。
+ */
 BaseType_t htQueueSendFromISR(QueueHandle_t xQueue, const void *pvItemToQueue, BaseType_t *pxHigherPriorityTaskWoken);
 
+/* ------------------------------------------------------------------ */
+/* 队列接收                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief 从队列接收一个数据项，队列空时可阻塞等待。
+ *
+ * @param[in] xQueue 队列句柄。
+ * @param[out] pvBuffer 接收缓冲区，长度至少为 uxItemSize 字节。
+ * @param[in] xTicksToWait 队列空时最长阻塞的 tick 数，传 htBLOCKED_INDEFINITELY 表示永久等待。
+ * @return htPASS(0) 表示成功，htFAIL(-1) 表示超时或参数非法。
+ */
 BaseType_t htQueueReceive(QueueHandle_t xQueue, void *pvBuffer, TickType_t xTicksToWait);
+
+/**
+ * @brief 中断上下文里从队列接收一个数据项，不阻塞。
+ *
+ * @param[in] xQueue 队列句柄。
+ * @param[out] pvBuffer 接收缓冲区。
+ * @param[out] pxHigherPriorityTaskWoken 若唤醒的任务优先级高于当前任务，会被写为 htTRUE。
+ * @return htPASS(0) 表示成功，htFAIL(-1) 表示队列为空。
+ */
 BaseType_t htQueueReceiveFromISR(QueueHandle_t xQueue, void *pvBuffer, BaseType_t *pxHigherPriorityTaskWoken);
 
+/* ------------------------------------------------------------------ */
+/* 队列查询与维护                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief 读取队列中当前的消息数。
+ *
+ * @param[in] xQueue 队列句柄。
+ * @return 当前消息数；句柄为 NULL 时返回 0。
+ * @note 读取过程关中断，结果是一致的快照。
+ */
 UBaseType_t htQueueMessagesWaiting(QueueHandle_t xQueue);
+/**
+ * @brief 读取队列还剩多少空位。
+ *
+ * @param[in] xQueue 队列句柄。
+ * @return 剩余空位数；句柄为 NULL 时返回 0。
+ */
 UBaseType_t htQueueSpacesAvailable(QueueHandle_t xQueue);
+/**
+ * @brief 覆盖写入，队列满时用新数据替换最旧的一项。
+ *
+ * @param[in] xQueue 队列句柄，必须是通过容量为 1、itemSize 非 0 创建的队列。
+ * @param[in] pvItemToQueue 待写入数据的指针。
+ * @return htPASS(0) 表示成功，htFAIL(-1) 表示队列形态不满足覆盖写条件。
+ * @note 满时覆盖头部并重置读写指针，不会阻塞、也不会丢同步语义。
+ */
 BaseType_t htQueueOverwrite(QueueHandle_t xQueue, const void *pvItemToQueue);
+/**
+ * @brief 把队列恢复到刚创建时的空状态。
+ *
+ * @param[in] xQueue 队列句柄。
+ * @return htPASS(0) 表示成功，htFAIL(-1) 表示句柄非法。
+ * @note 会清零消息数、读写指针与收发锁；对信号量则把计数一并清零。
+ */
 BaseType_t htQueueReset(QueueHandle_t xQueue);
+/**
+ * @brief 查看队首数据但不出队，队列空时可阻塞等待。
+ *
+ * @param[in] xQueue 队列句柄。
+ * @param[out] pvBuffer 接收缓冲区。
+ * @param[in] xTicksToWait 最长阻塞 tick 数。
+ * @return htPASS(0) 表示成功，htFAIL(-1) 表示超时或参数非法。
+ * @note 数据仍留在队列里，仍会被后续的 htQueueReceive() 取走。
+ */
 BaseType_t htQueuePeek(QueueHandle_t xQueue, void *pvBuffer, TickType_t xTicksToWait);
 
 #endif /* HT_QUEUE_H */
