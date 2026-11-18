@@ -1,17 +1,26 @@
+/**
+ * @file httask.c
+ * @brief 任务管理核心：创建、删除、延时、挂起/恢复、优先级与任务通知。
+ *
+ * 一个任务的全部状态都放在 htTCB_t 里，并通过三个链表项挂到不同链表上：
+ * 状态项挂就绪链表或延时链表，事件项挂队列/信号量等待链表，跟踪项挂
+ * pxAllocatedTasksList 以便调试时遍历全部任务。任务切换靠请求 PendSV 实现，
+ * 真正的寄存器现场由 portable/Cortex-M/htPortContext.c 保存。
+ */
 #include "httask.h"
 #include "htmem.h"
 #include "htlist.h"
 #include "htscheduler.h"
 #include <string.h>
 #include "stm32f1xx_hal.h"
-#include "core_cm3.h" // 添加此头文件以提供NVIC函数和中断相关定义
+#include "core_cm3.h" /* 提供 NVIC 与 ICSR 等内核寄存器定义 */
 
 #if configDEBUG_IDLE_STATS
 #include <stdio.h>
 #endif
 
 /* 全局变量 */
-htTCB_t *pxCurrentTCB = NULL; /* 当前运行的任务TCB */
+htTCB_t *pxCurrentTCB = NULL; /* 当前运行的任务 TCB */
 UBaseType_t uxCurrentNumberOfTasks = 0; /* 当前任务数量 */
 TickType_t xTickCount = 0; /* 系统tick计数 */
 
@@ -26,19 +35,21 @@ htList_t *pxOverflowDelayedTaskList;
 static htList_t xSuspendedTaskList;
 /* 自删除任务必须由空闲任务在完成上下文切换后释放。 */
 static htList_t xTasksWaitingTermination;
-// 所有任务列表
+/* 所有任务链表：调试时可遍历全部在册任务。 */
 htList_t pxAllocatedTasksList;
 
 /**
- * 检查调度器是否需要切换任务
- * 从htscheduler.c导入函数声明
+ * @brief 从 htscheduler.c 导入的"是否需要切换"判定。
+ *
+ * @return 需要切换返回 htTRUE，否则返回 htFALSE。
  */
 extern BaseType_t htSchedulerNeedsSwitch(void);
 
 /**
- * 初始化任务调度器
- * 在htSchedulerInit中调用以避免未使用警告
- * 删除static关键字使函数对外可见
+ * @brief 初始化全部任务链表：各优先级就绪链表、延时/溢出链表、挂起与终止链表。
+ *
+ * @note 由 htSchedulerInit() 调用；去掉 static 只是为了让调度器初始化能调用
+ *       它，并不属于对外 API。
  */
 void prvInitialiseTaskLists(void)
 {
@@ -64,7 +75,7 @@ void prvInitialiseTaskLists(void)
 }
 
 /**
- * 任务函数返回后的最终归宿。
+ * @brief 任务函数返回后的最终归宿：永久停机。
  *
  * 任务函数禁止返回；一旦返回，bx lr 必须落到一条永久停机指令上。若把 LR 设为
  * 0xFFFFFFFE 这类非法地址，Cortex-M3 只会报 HardFault，CFSR 的 UFSR 段给出
@@ -78,14 +89,22 @@ static void prvTaskExitTrap(void)
 }
 
 /**
- * 初始化任务栈
+ * @brief 在任务栈顶构造一个"异常返回帧"，让任务首次被调度时像从中断返回一样起跑。
+ *
+ * @param[in] pxTopOfStack 栈顶指针（由调用者给出，通常为 栈底 + 深度 - 1）。
+ * @param[in] pxCode 任务入口函数。
+ * @param[in] pvParameters 传给任务的唯一参数，异常返回时装进 R0。
+ *
+ * @return 压好帧之后的新栈顶，写入 htTCB_t.pxTopOfStack。
+ *
+ * @warning 栈顶必须先做 8 字节对齐；xPSR 的 T 位必须为 1，而 PC 槽的 bit0 必须为 0。
  */
 static StackType_t *prvInitialiseTaskStack(StackType_t *pxTopOfStack, TaskFunction_t pxCode, void *pvParameters)
 {
 	/* Cortex-M 异常入口要求栈顶 8 字节对齐；uintptr_t 同时兼容 64 位主机测试。 */
 	pxTopOfStack = (StackType_t *)((uintptr_t)pxTopOfStack & ~(uintptr_t)0x7U);
 
-	// 构建异常框架 - 从底向上
+	/* 先构造硬件异常返回帧（从高地址往低地址压）。 */
 	*(--pxTopOfStack) = 0x01000000; /* xPSR - T位置位 */
 	/* PC 槽由硬件异常返回装载：必须存偶数地址（bit0=0）。Thumb 状态由同一帧中
 	   xPSR 的 T 位给出，把 bit0 置 1 反而会让返回失败：Cortex-M3 报 INVPC
@@ -98,7 +117,7 @@ static StackType_t *prvInitialiseTaskStack(StackType_t *pxTopOfStack, TaskFuncti
 	*(--pxTopOfStack) = 0; /* R1 */
 	*(--pxTopOfStack) = (uint32_t)pvParameters; /* R0 - 任务参数 */
 
-	// 构建软件保存的寄存器
+	/* 再压入软件保存的 r4-r11，与 PendSV 里的 stmdb r0!,{r4-r11} 对应。 */
 	*(--pxTopOfStack) = 0; /* R11 */
 	*(--pxTopOfStack) = 0; /* R10 */
 	*(--pxTopOfStack) = 0; /* R9 */
@@ -111,6 +130,23 @@ static StackType_t *prvInitialiseTaskStack(StackType_t *pxTopOfStack, TaskFuncti
 	return pxTopOfStack;
 }
 
+/**
+ * @brief 初始化一个新任务的 TCB：填栈哨兵、建初始栈帧、挂入就绪链表。
+ *
+ * @param[in] pxTaskCode 任务入口函数。
+ * @param[in] pcName 任务名，最多 configMAX_TASK_NAME_LEN - 1 个字符。
+ * @param[in] usStackDepth 栈深度，单位 StackType_t 字。
+ * @param[in] pvParameters 传给任务的参数。
+ * @param[in] uxPriority 优先级，越界时被钳到 configMAX_PRIORITIES - 1。
+ * @param[in] pxStack 栈底地址。
+ * @param[in,out] pxNewTCB 待填充的 TCB。
+ * @param[in] ucStaticallyAllocated 非 0 表示 TCB 与栈都由用户静态提供。
+ *
+ * @return 初始化成功返回 htPASS，参数非法返回 htFAIL。
+ *
+ * @note pxCurrentTCB == NULL 的分支只覆盖"第一个任务"；之后创建的任务不会改写
+ *       pxCurrentTCB，启动调度前必须由调度器重新选一次，否则会栈交叉污染。
+ */
 static BaseType_t prvInitialiseNewTask(TaskFunction_t pxTaskCode, const char *pcName, uint16_t usStackDepth,
 		void *pvParameters, UBaseType_t uxPriority, StackType_t *pxStack, htTCB_t *pxNewTCB,
 		uint8_t ucStaticallyAllocated)
@@ -122,6 +158,7 @@ static BaseType_t prvInitialiseNewTask(TaskFunction_t pxTaskCode, const char *pc
 		uxPriority = configMAX_PRIORITIES - 1U;
 	}
 
+	/* 先用哨兵值填满整个栈，供栈溢出检查判断水位线。 */
 	for (UBaseType_t uxIndex = 0U; uxIndex < usStackDepth; uxIndex++) {
 		pxStack[uxIndex] = htTASK_STACK_FILL_VALUE;
 	}
@@ -130,6 +167,7 @@ static BaseType_t prvInitialiseNewTask(TaskFunction_t pxTaskCode, const char *pc
 	pxNewTCB->uxStackDepth = usStackDepth;
 	pxNewTCB->ucStaticallyAllocated = ucStaticallyAllocated;
 
+	/* 任务名超过上限就截断，并保证以结束符结尾。 */
 	size_t xNameLength = 0U;
 	while (xNameLength < (configMAX_TASK_NAME_LEN - 1U) && pcName[xNameLength] != '\0') {
 		xNameLength++;
@@ -143,6 +181,7 @@ static BaseType_t prvInitialiseNewTask(TaskFunction_t pxTaskCode, const char *pc
 	pxNewTCB->uxBasePriority = uxPriority;
 	pxNewTCB->uxNotificationStatus = HT_NOTIFY_NOT_WAITING;
 
+	/* 三个链表项：状态项挂就绪/延时链表，事件项挂等待链表，跟踪项挂全局链表。 */
 	htListItemInit(&(pxNewTCB->xStateListItem));
 	htListItemInit(&(pxNewTCB->xEventListItem));
 	htListItemInit(&(pxNewTCB->xAllListItem));
@@ -153,6 +192,7 @@ static BaseType_t prvInitialiseNewTask(TaskFunction_t pxTaskCode, const char *pc
 	htListSetItemValue(&(pxNewTCB->xAllListItem), configMAX_PRIORITIES - uxPriority);
 	htListInsertEnd(&pxAllocatedTasksList, &(pxNewTCB->xAllListItem));
 
+	/* 初始为就绪态，直接挂到对应优先级的就绪链表尾部。 */
 	pxNewTCB->uxTaskState = HT_TASK_READY;
 	htListInsertEnd(&(pxReadyTasksLists[uxPriority]), &(pxNewTCB->xStateListItem));
 	uxCurrentNumberOfTasks++;
@@ -162,6 +202,20 @@ static BaseType_t prvInitialiseNewTask(TaskFunction_t pxTaskCode, const char *pc
 	return htPASS;
 }
 
+/**
+ * @brief 动态创建任务：从内核堆分别分配 TCB 与任务栈。
+ *
+ * @param[in] pxTaskCode 任务入口函数，不允许返回。
+ * @param[in] pcName 任务名。
+ * @param[in] usStackDepth 栈深度（字）；小于 configMINIMAL_STACK_SIZE 时按最小值处理。
+ * @param[in] pvParameters 传给任务的参数。
+ * @param[in] uxPriority 优先级。
+ * @param[out] pxCreatedTask 返回任务句柄，可为 NULL。
+ *
+ * @return 成功返回 htPASS；内存不足或参数非法返回 htFAIL。
+ *
+ * @note 任何一步失败都会回滚此前已分配的内存，不会泄漏。
+ */
 BaseType_t htTaskCreate(TaskFunction_t pxTaskCode, const char *const pcName, const uint16_t usStackDepth,
 		void *const pvParameters, UBaseType_t uxPriority, TaskHandle_t *const pxCreatedTask)
 {
@@ -196,6 +250,21 @@ BaseType_t htTaskCreate(TaskFunction_t pxTaskCode, const char *const pcName, con
 	return htPASS;
 }
 
+/**
+ * @brief 静态创建任务：TCB 与栈都由调用者提供，不占堆空间。
+ *
+ * @param[in] pxTaskCode 任务入口函数，不允许返回。
+ * @param[in] pcName 任务名。
+ * @param[in] usStackDepth 栈深度（字），不得小于 configMINIMAL_STACK_SIZE。
+ * @param[in] pvParameters 传给任务的参数。
+ * @param[in] uxPriority 优先级。
+ * @param[in] puxStackBuffer 调用者提供的栈空间。
+ * @param[in,out] pxTaskBuffer 调用者提供的 TCB。
+ *
+ * @return 成功返回任务句柄，失败返回 NULL。
+ *
+ * @note configSUPPORT_STATIC_ALLOCATION 为 0 时只吞掉参数并返回 NULL。
+ */
 TaskHandle_t htTaskCreateStatic(TaskFunction_t pxTaskCode, const char *const pcName, uint16_t usStackDepth,
 		void *const pvParameters, UBaseType_t uxPriority, StackType_t *puxStackBuffer, htTCB_t *pxTaskBuffer)
 {
@@ -218,8 +287,10 @@ TaskHandle_t htTaskCreateStatic(TaskFunction_t pxTaskCode, const char *const pcN
 }
 
 /**
- * 增加系统时钟计数
- * 此函数用在htSchedulerTickHandler中以避免未使用警告
+ * @brief 直接递增系统滴答计数，供测试或调度器内部使用。
+ *
+ * @note 不走 htTaskTickInc() 的完整流程：不扫描延时任务，也不请求上下文切换。
+ *       保留这个入口是为了避免 htSchedulerTickHandler 里出现未使用符号告警。
  */
 void htIncrementTick(void)
 {
@@ -227,7 +298,10 @@ void htIncrementTick(void)
 }
 
 /**
- * 空闲任务函数 - 当没有其他任务准备运行时，运行此任务
+ * @brief 回收已删除任务占用的内存，由空闲任务循环调用。
+ *
+ * @note 自删除任务不能立刻释放自己的栈（还在用），只能先挂到
+ *       xTasksWaitingTermination，等切换到别的任务之后再回收。
  */
 static void prvDeleteTerminatedTasks(void)
 {
@@ -243,7 +317,9 @@ static void prvDeleteTerminatedTasks(void)
 		htListRemove(pxItem);
 		htExitCritical();
 
+		/* 先脱离临界区再释放内存：htPortFree 不需要关中断，也能缩短关中断时间。 */
 		if (pxTCB != NULL) {
+			/* 静态分配的 TCB 与栈不属于内核，不能释放。 */
 			if (pxTCB->ucStaticallyAllocated == 0U) {
 				htPortFree(pxTCB->pxStack);
 				htPortFree(pxTCB);
@@ -252,6 +328,13 @@ static void prvDeleteTerminatedTasks(void)
 	}
 }
 
+/**
+ * @brief 空闲任务主体：优先级最低，只在没有其他任务可运行时执行。
+ *
+ * @param[in] pvParameters 未使用。
+ *
+ * @note 每轮先回收已删除任务，再按配置决定是否让出 CPU、调用空闲钩子或打印统计。
+ */
 static void htprvIdleTask(void *pvParameters)
 {
 	/* 防止编译器警告 */
@@ -300,7 +383,11 @@ static htTCB_t xIdleTaskTCB;
 #endif
 
 /**
- * 创建空闲任务
+ * @brief 创建内核空闲任务（幂等，重复调用不会重复创建）。
+ *
+ * @return 已存在或创建成功返回 htPASS，失败返回 htFAIL。
+ *
+ * @note 用函数内的静态变量记住 TCB，保证只创建一次。
  */
 BaseType_t htprvCreateIdleTask(void)
 {
@@ -330,10 +417,13 @@ BaseType_t htprvCreateIdleTask(void)
 
 #if (configCHECK_FOR_STACK_OVERFLOW > 0)
 /**
- * 栈溢出钩子：弱符号，默认停机。
+ * @brief 栈溢出钩子：弱符号，默认直接停机。
  *
- * 继续运行只会写坏相邻内存，让故障离现场越来越远；停机能让调试器
- * 直接停在写崩栈的那个任务上。应用提供同名强符号即可接管。
+ * @param[in] xTask 发生溢出的任务句柄。
+ * @param[in] pcTaskName 任务名，便于调试时定位。
+ *
+ * @note 继续运行只会写坏相邻内存，让故障离现场越来越远；停机能让调试器直接
+ *       停在写崩栈的那个任务上。应用提供同名强符号即可接管。
  */
 __attribute__((weak)) void htStackOverflowHook(TaskHandle_t xTask, const char *pcTaskName)
 {
@@ -345,13 +435,15 @@ __attribute__((weak)) void htStackOverflowHook(TaskHandle_t xTask, const char *p
 }
 
 /**
- * 检查一个任务是否写穿了自己的栈。
+ * @brief 检查一个任务是否写穿了自己的栈。
  *
  * 栈底 4 个字在创建任务时被填成 htTASK_STACK_FILL_VALUE，正常执行不会碰到；
- * 只要它们变了，就是栈指针已经越过边界。只查 4 个字是为了让
- * 开销恒定在几个周期，可以留在每次任务切换里。
+ * 只要它们变了，就说明栈指针已经越过边界。只查 4 个字是为了让开销恒定在几个
+ * 周期量级，可以留在每次任务切换里。
  *
- * @param xTask 要检查的任务，NULL 表示当前任务
+ * @param[in] xTask 要检查的任务，NULL 表示当前任务。
+ *
+ * @note 任务尚未初始化（栈指针或深度非法）时直接返回，不做误判。
  */
 void htTaskCheckStackSentinel(TaskHandle_t xTask)
 {
@@ -370,34 +462,39 @@ void htTaskCheckStackSentinel(TaskHandle_t xTask)
 #endif /* configCHECK_FOR_STACK_OVERFLOW */
 
 /**
- * Task delay function - optimized implementation
+ * @brief 相对延时：让当前任务阻塞指定 tick 数，到期后重新就绪。
+ *
+ * @param[in] xTicksToDelay 延时 tick 数；为 0 时只让出 CPU、不进入阻塞态。
+ *
+ * @note 这里用 __disable_irq()/__enable_irq() 直接开关中断，而不是可嵌套的
+ *       htEnterCritical()，因此不能与临界区嵌套使用。
  */
 void htTaskDelay(TickType_t xTicksToDelay)
 {
-	// 如果延时为0，让出CPU但不阻塞
+	/* 延时为 0：只让出 CPU，不进入阻塞态。 */
 	if (xTicksToDelay == 0) {
 		htTaskYield();
 		return;
 	}
 
-	// 禁用中断来确保操作原子性
+	/* 关中断，保证"摘链表 + 挂延时链表"这一串操作是原子的。 */
 	__disable_irq();
 
-	// 验证必要的数据结构
+	/* 防御：延时链表或当前任务尚未就绪时直接返回。 */
 	if (pxDelayedTaskList == NULL || pxCurrentTCB == NULL) {
 		__enable_irq();
 		return;
 	}
 
-	// 计算任务唤醒时间
+	/* 算出唤醒时刻；tick 回绕时下面的比较会把它归入溢出链表。 */
 	TickType_t xTimeToWake = xTickCount + xTicksToDelay;
 
-	// 从就绪列表中移除当前任务
+	/* 若当前任务还挂在就绪链表里，先摘出来。 */
 	if (pxCurrentTCB->xStateListItem.pxContainer) {
 		htListRemove(&(pxCurrentTCB->xStateListItem));
 	}
 
-	// 设置唤醒时间值并进行按值插入
+	/* 把唤醒时刻写进状态项，按值升序插入延时链表。 */
 	htListSetItemValue(&(pxCurrentTCB->xStateListItem), xTimeToWake);
 
 	if (xTimeToWake > xTickCount) {
@@ -408,16 +505,24 @@ void htTaskDelay(TickType_t xTicksToDelay)
 		htListInsert(pxOverflowDelayedTaskList, &(pxCurrentTCB->xStateListItem));
 	}
 
-	// 更新任务状态
+	/* 标记为阻塞态。 */
 	pxCurrentTCB->uxTaskState = HT_TASK_BLOCKED;
 
-	// 启用中断
+	/* 重新开中断，随后请求一次切换让出 CPU。 */
 	__enable_irq();
 	htTaskYield();
 }
 
 /**
- * 按绝对周期延时，避免周期任务逐次漂移。
+ * @brief 按绝对周期延时，避免周期任务逐次累积漂移。
+ *
+ * @param[in,out] pxPreviousWakeTime 上一次唤醒时刻；返回时被更新为下一次唤醒时刻。
+ * @param[in] xTimeIncrement 周期长度（tick）。
+ *
+ * @return 正常进入延时返回 htPASS；已经错过唤醒时刻、无需等待时返回 htFAIL。
+ *
+ * @note 差值用 int32_t 计算，天然处理 tick 回绕；xTimeIncrement 超过 INT32_MAX
+ *       会被拒绝，否则差值的符号位失去意义。
  */
 BaseType_t htTaskDelayUntil(TickType_t *pxPreviousWakeTime, TickType_t xTimeIncrement)
 {
@@ -436,12 +541,28 @@ BaseType_t htTaskDelayUntil(TickType_t *pxPreviousWakeTime, TickType_t xTimeIncr
 	return htPASS;
 }
 
+/**
+ * @brief 查询任务优先级。
+ *
+ * @param[in] xTask 任务句柄；NULL 表示当前任务。
+ *
+ * @return 优先级；句柄与当前任务都无效时返回 0。
+ */
 UBaseType_t htTaskPriorityGet(TaskHandle_t xTask)
 {
 	htTCB_t *pxTCB = xTask == NULL ? pxCurrentTCB : (htTCB_t *)xTask;
 	return pxTCB == NULL ? 0U : pxTCB->uxPriority;
 }
 
+/**
+ * @brief 修改任务优先级，并按需要把它在链表间重新排队。
+ *
+ * @param[in] xTask 任务句柄；NULL 表示当前任务。
+ * @param[in] uxNewPriority 新优先级，越界时钳到 configMAX_PRIORITIES - 1。
+ *
+ * @note 优先级变化后要同步状态项、事件项、跟踪项三者的值；若需要切换，则
+ *       在退出临界区之后再让出 CPU。
+ */
 void htTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority)
 {
 	htTCB_t *pxTCB = xTask == NULL ? pxCurrentTCB : (htTCB_t *)xTask;
@@ -460,11 +581,13 @@ void htTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority)
 			htListRemove(&(pxTCB->xStateListItem));
 		}
 
+		/* 若正挂在某个事件等待链表上，先摘下来，稍后按新优先级重新插入。 */
 		htList_t *pxEventList = (htList_t *)pxTCB->xEventListItem.pxContainer;
 		if (pxEventList != NULL) {
 			htListRemove(&(pxTCB->xEventListItem));
 		}
 
+		/* 更新优先级与基优先级，并同步三个链表项的值。 */
 		pxTCB->uxPriority = uxNewPriority;
 		pxTCB->uxBasePriority = uxNewPriority;
 		htListSetItemValue(&(pxTCB->xAllListItem), configMAX_PRIORITIES - uxNewPriority);
@@ -478,6 +601,7 @@ void htTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority)
 			htListInsert(pxEventList, &(pxTCB->xEventListItem));
 		}
 
+		/* 降低了当前任务优先级，或有更高优先级任务变为就绪，都需要切换。 */
 		if (pxCurrentTCB != NULL && ((pxTCB == pxCurrentTCB && uxNewPriority < uxOldPriority) ||
 											(pxTCB != pxCurrentTCB && pxTCB->uxTaskState == HT_TASK_READY &&
 													uxNewPriority > pxCurrentTCB->uxPriority))) {
@@ -490,6 +614,14 @@ void htTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority)
 	}
 }
 
+/**
+ * @brief 挂起任务：把任务从就绪/等待链表摘下，改挂到挂起链表。
+ *
+ * @param[in] xTaskToSuspend 任务句柄；NULL 表示当前任务。
+ *
+ * @note 挂起只影响能否被调度，不撤销任务的等待超时；对已挂起任务重复调用无副作用。
+ * @note 挂起自己之后必须让出 CPU，否则会原地空转。
+ */
 void htTaskSuspend(TaskHandle_t xTaskToSuspend)
 {
 	htTCB_t *pxTCB = xTaskToSuspend == NULL ? pxCurrentTCB : (htTCB_t *)xTaskToSuspend;
@@ -497,6 +629,7 @@ void htTaskSuspend(TaskHandle_t xTaskToSuspend)
 		return;
 	}
 
+	/* 记录是否挂起的是自己：只有挂起自己才需要主动让出 CPU。 */
 	const BaseType_t xSuspendCurrent = pxTCB == pxCurrentTCB ? htTRUE : htFALSE;
 	htEnterCritical();
 	htListRemove(&(pxTCB->xStateListItem));
@@ -511,6 +644,15 @@ void htTaskSuspend(TaskHandle_t xTaskToSuspend)
 	}
 }
 
+/**
+ * @brief 把任务从挂起链表恢复成就绪态。
+ *
+ * @param[in] pxTCB 目标任务。
+ *
+ * @return 需要立即切换返回 htTRUE；任务不在挂起链表或参数非法返回 htFALSE。
+ *
+ * @warning 调用者需自行保证临界区；htTaskResumeFromISR 靠中断上下文天然互斥。
+ */
 static BaseType_t prvResumeTask(htTCB_t *pxTCB)
 {
 	if (pxTCB == NULL || pxTCB->uxTaskState != HT_TASK_SUSPENDED ||
@@ -518,13 +660,27 @@ static BaseType_t prvResumeTask(htTCB_t *pxTCB)
 		return htFALSE;
 	}
 
+	/* 从挂起链表摘下，重置状态项的值后挂回对应优先级的就绪链表。 */
 	htListRemove(&(pxTCB->xStateListItem));
 	htListSetItemValue(&(pxTCB->xStateListItem), configMAX_PRIORITIES - pxTCB->uxPriority);
 	pxTCB->uxTaskState = HT_TASK_READY;
 	htListInsertEnd(&(pxReadyTasksLists[pxTCB->uxPriority]), &(pxTCB->xStateListItem));
+	/* 新任务优先级高于当前任务时才需要切换。 */
 	return pxCurrentTCB == NULL || pxTCB->uxPriority > pxCurrentTCB->uxPriority ? htTRUE : htFALSE;
 }
 
+/**
+ * @brief 把任务阻塞在"等待任务通知"上，必要时同时挂入延时链表。
+ *
+ * @param[in,out] pxTCB 要阻塞的任务，通常是当前任务。
+ * @param[in] xTicksToWait 最长等待 tick 数；htBLOCKED_INDEFINITELY 表示无限等待。
+ *
+ * @return 阻塞成功返回 htPASS；参数非法或延时链表未就绪返回 htFAIL。
+ *
+ * @warning 必须在临界区内调用。
+ * @note 任务通知没有独立的事件链表，所以只动状态项，等待标志存放在
+ *       uxNotificationStatus 里。
+ */
 static BaseType_t prvBlockCurrentTaskOnNotification(htTCB_t *pxTCB, TickType_t xTicksToWait)
 {
 	if (pxTCB == NULL) {
@@ -552,6 +708,15 @@ static BaseType_t prvBlockCurrentTaskOnNotification(htTCB_t *pxTCB, TickType_t x
 	return htPASS;
 }
 
+/**
+ * @brief 把因等待任务通知而阻塞的任务唤醒成就绪态。
+ *
+ * @param[in] pxTCB 目标任务。
+ *
+ * @return 需要立即切换返回 htTRUE；任务状态不符或参数非法返回 htFALSE。
+ *
+ * @warning 必须在临界区内调用。
+ */
 static BaseType_t prvUnblockNotificationTask(htTCB_t *pxTCB)
 {
 	if (pxTCB == NULL || pxTCB->uxPriority >= configMAX_PRIORITIES || pxTCB->uxTaskState != HT_TASK_BLOCKED) {
@@ -566,6 +731,18 @@ static BaseType_t prvUnblockNotificationTask(htTCB_t *pxTCB)
 	return pxCurrentTCB == NULL || pxTCB->uxPriority > pxCurrentTCB->uxPriority ? htTRUE : htFALSE;
 }
 
+/**
+ * @brief 按指定动作修改目标任务的通知值，并在需要时唤醒它。
+ *
+ * @param[in,out] pxTCB 目标任务。
+ * @param[in] ulValue 参与运算的值，具体含义由 xAction 决定。
+ * @param[in] xAction 通知动作，取值见 htNotifyAction_t。
+ * @param[out] pxYieldRequired 若唤醒的任务优先级更高则置 htTRUE，可为 NULL。
+ *
+ * @return 通知已投递返回 htPASS；动作非法或"不覆盖已有值"检查失败返回 htFAIL。
+ *
+ * @note 目标不在等待状态时通知值照样更新，只是不会唤醒它。
+ */
 static BaseType_t prvNotifyTask(htTCB_t *pxTCB, uint32_t ulValue, htNotifyAction_t xAction, BaseType_t *pxYieldRequired)
 {
 	if (pxTCB == NULL || xAction > HT_NOTIFY_SET_VALUE_WITHOUT_OVERWRITE) {
@@ -575,6 +752,7 @@ static BaseType_t prvNotifyTask(htTCB_t *pxTCB, uint32_t ulValue, htNotifyAction
 		return htFAIL;
 	}
 
+	/* 记下进入时的状态：只有它本来在等通知，才需要唤醒。 */
 	const UBaseType_t uxPreviousStatus = pxTCB->uxNotificationStatus;
 	switch (xAction) {
 		case HT_NOTIFY_NO_ACTION:
@@ -595,6 +773,7 @@ static BaseType_t prvNotifyTask(htTCB_t *pxTCB, uint32_t ulValue, htNotifyAction
 			return htFAIL;
 	}
 
+	/* 值已更新，状态置为"已收到"；若它正在等，就顺带唤醒。 */
 	pxTCB->uxNotificationStatus = HT_NOTIFY_RECEIVED;
 	if (uxPreviousStatus == HT_NOTIFY_WAITING && prvUnblockNotificationTask(pxTCB) == htTRUE &&
 			pxYieldRequired != NULL) {
@@ -603,6 +782,13 @@ static BaseType_t prvNotifyTask(htTCB_t *pxTCB, uint32_t ulValue, htNotifyAction
 	return htPASS;
 }
 
+/**
+ * @brief 恢复被挂起的任务。
+ *
+ * @param[in] xTaskToResume 任务句柄。
+ *
+ * @note 若被恢复任务的优先级高于当前任务，会立即让出 CPU。
+ */
 void htTaskResume(TaskHandle_t xTaskToResume)
 {
 	htTCB_t *pxTCB = (htTCB_t *)xTaskToResume;
@@ -615,11 +801,31 @@ void htTaskResume(TaskHandle_t xTaskToResume)
 	}
 }
 
+/**
+ * @brief 在中断中恢复被挂起的任务。
+ *
+ * @param[in] xTaskToResume 任务句柄。
+ *
+ * @return 需要中断退出后切换返回 htTRUE，否则返回 htFALSE。
+ *
+ * @warning 只能在中断上下文调用；不阻塞，也不进入临界区。
+ */
 BaseType_t htTaskResumeFromISR(TaskHandle_t xTaskToResume)
 {
 	return prvResumeTask((htTCB_t *)xTaskToResume);
 }
 
+/**
+ * @brief 向指定任务投递一次任务通知。
+ *
+ * @param[in] xTaskToNotify 目标任务句柄。
+ * @param[in] ulValue 参与运算的值，含义由 xAction 决定。
+ * @param[in] xAction 通知动作。
+ *
+ * @return 投递成功返回 htPASS；动作非法、目标为空或功能未开启返回 htFAIL。
+ *
+ * @note configUSE_TASK_NOTIFICATIONS 为 0 时只吞掉参数并返回 htFAIL。
+ */
 BaseType_t htTaskNotify(TaskHandle_t xTaskToNotify, uint32_t ulValue, htNotifyAction_t xAction)
 {
 #if configUSE_TASK_NOTIFICATIONS == 1
@@ -643,6 +849,18 @@ BaseType_t htTaskNotify(TaskHandle_t xTaskToNotify, uint32_t ulValue, htNotifyAc
 #endif
 }
 
+/**
+ * @brief 在中断中向任务投递通知，不阻塞。
+ *
+ * @param[in] xTaskToNotify 目标任务句柄。
+ * @param[in] ulValue 参与运算的值。
+ * @param[in] xAction 通知动作。
+ * @param[out] pxHigherPriorityTaskWoken 若唤醒了更高优先级任务则置 htTRUE；可为 NULL。
+ *
+ * @return 投递成功返回 htPASS，失败返回 htFAIL。
+ *
+ * @warning 只能在中断上下文调用。
+ */
 BaseType_t htTaskNotifyFromISR(
 		TaskHandle_t xTaskToNotify, uint32_t ulValue, htNotifyAction_t xAction, BaseType_t *pxHigherPriorityTaskWoken)
 {
@@ -662,16 +880,43 @@ BaseType_t htTaskNotifyFromISR(
 #endif
 }
 
+/**
+ * @brief 以"计数信号量"方式给目标任务一次通知（通知值加一）。
+ *
+ * @param[in] xTaskToNotify 目标任务句柄。
+ *
+ * @return 成功返回 htPASS，失败返回 htFAIL。
+ */
 BaseType_t htTaskNotifyGive(TaskHandle_t xTaskToNotify)
 {
 	return htTaskNotify(xTaskToNotify, 0U, HT_NOTIFY_INCREMENT);
 }
 
+/**
+ * @brief 在中断中以"计数信号量"方式给任务通知。
+ *
+ * @param[in] xTaskToNotify 目标任务句柄。
+ * @param[out] pxHigherPriorityTaskWoken 若唤醒了更高优先级任务则置 htTRUE；可为 NULL。
+ *
+ * @return 成功返回 htPASS，失败返回 htFAIL。
+ */
 BaseType_t htTaskNotifyGiveFromISR(TaskHandle_t xTaskToNotify, BaseType_t *pxHigherPriorityTaskWoken)
 {
 	return htTaskNotifyFromISR(xTaskToNotify, 0U, HT_NOTIFY_INCREMENT, pxHigherPriorityTaskWoken);
 }
 
+/**
+ * @brief 等待任务通知，并按掩码在进入等待前/取到通知后清除通知值中的位。
+ *
+ * @param[in] ulBitsToClearOnEntry 进入等待前要从通知值中清掉的位。
+ * @param[in] ulBitsToClearOnExit 取到通知后要从通知值中清掉的位。
+ * @param[out] pulNotificationValue 返回本次拿到的通知值，可为 NULL。
+ * @param[in] xTicksToWait 最长等待 tick 数，0 表示不等待。
+ *
+ * @return 拿到通知返回 htPASS，超时返回 htFAIL。
+ *
+ * @note 只有"尚未收到通知"时才进入等待；等待期间投递的通知不会被丢弃。
+ */
 BaseType_t htTaskNotifyWait(uint32_t ulBitsToClearOnEntry, uint32_t ulBitsToClearOnExit, uint32_t *pulNotificationValue,
 		TickType_t xTicksToWait)
 {
@@ -722,6 +967,14 @@ BaseType_t htTaskNotifyWait(uint32_t ulBitsToClearOnEntry, uint32_t ulBitsToClea
 #endif
 }
 
+/**
+ * @brief 以"计数信号量"方式取出通知值。
+ *
+ * @param[in] xClearCountOnExit 非 htFALSE 时取完后把通知值清零，否则只减一。
+ * @param[in] xTicksToWait 通知值为 0 时的最长等待 tick 数。
+ *
+ * @return 取到的通知值；超时或功能未开启返回 0。
+ */
 uint32_t htTaskNotifyTake(BaseType_t xClearCountOnExit, TickType_t xTicksToWait)
 {
 #if configUSE_TASK_NOTIFICATIONS == 1
@@ -760,31 +1013,60 @@ uint32_t htTaskNotifyTake(BaseType_t xClearCountOnExit, TickType_t xTicksToWait)
 #endif
 }
 
+/**
+ * @brief 取当前正在运行的任务句柄。
+ *
+ * @return 当前任务 TCB；调度器尚未启动时返回 NULL。
+ */
 TaskHandle_t htTaskGetCurrentTaskHandle(void)
 {
 	return (TaskHandle_t)pxCurrentTCB;
 }
 
+/**
+ * @brief 查询任务名。
+ *
+ * @param[in] xTaskToQuery 任务句柄；NULL 表示当前任务。
+ *
+ * @return 指向 TCB 内任务名缓冲区的指针；句柄无效时返回 NULL。
+ *
+ * @note 返回的是 TCB 内部缓冲区，不能修改也不能释放。
+ */
 char *htTaskGetName(TaskHandle_t xTaskToQuery)
 {
 	htTCB_t *pxTCB = xTaskToQuery == NULL ? pxCurrentTCB : (htTCB_t *)xTaskToQuery;
 	return pxTCB == NULL ? NULL : pxTCB->pcTaskName;
 }
 
+/**
+ * @brief 查询任务当前状态。
+ *
+ * @param[in] xTask 任务句柄；NULL 表示当前任务。
+ *
+ * @return 状态枚举值；句柄与当前任务都无效时返回 HT_TASK_INVALID。
+ */
 htTaskStatus_t htTaskGetState(TaskHandle_t xTask)
 {
 	htTCB_t *pxTCB = xTask == NULL ? pxCurrentTCB : (htTCB_t *)xTask;
 	return pxTCB == NULL ? HT_TASK_INVALID : (htTaskStatus_t)pxTCB->uxTaskState;
 }
 
+/**
+ * @brief 启动调度器的别名入口，直接转调 htStartScheduler()。
+ *
+ * @note 保留该名字是为了兼容 FreeRTOS 风格的调用习惯。
+ */
 void htTaskStartScheduler(void)
 {
 	htStartScheduler();
 }
 
 /**
- * 任务调度函数
- * 让出CPU控制权，切换到其他任务
+ * @brief 请求一次上下文切换：置位 PendSV，让出 CPU。
+ *
+ * @note 写 0xE000ED04（ICSR）的 PENDSVSET 位；PendSV 被设为最低优先级，
+ *       因此总在当前所有中断退出后才执行切换。若已在中断里，则等中断返回时切换。
+ * @note 主机单元测试下改调 htHostTestYieldHook()，不触碰硬件寄存器。
  */
 void htTaskYield(void)
 {
@@ -792,116 +1074,130 @@ void htTaskYield(void)
 	extern void htHostTestYieldHook(void);
 	htHostTestYieldHook();
 #else
-	/* 触发PendSV中断，进行上下文切换 */
-	*((volatile uint32_t *)0xE000ED04) = 0x10000000; /* 设置PENDSVSET位 */
+	/* 触发 PendSV：向 ICSR 的 PENDSVSET 位写 1，请求一次上下文切换。 */
+	*((volatile uint32_t *)0xE000ED04) = 0x10000000; /* ICSR 寄存器，置位 PENDSVSET */
 #endif
 
-	//    /* 内存屏障，确保之前的写操作完成 */
-	//    __asm volatile ("dsb" ::: "memory");
-	//    __asm volatile ("isb");
+	/*
+	 * 早期版本在这里还补了两条内存屏障，实测非必需，已注释掉：
+	 *   __asm volatile ("dsb" ::: "memory");
+	 *   __asm volatile ("isb");
+	 */
 }
 
 /**
- * Check and update delayed task list - fixed implementation for accurate timing
+ * @brief 扫描当前延时链表，把所有已到期的任务搬回就绪链表。
+ *
+ * @note 链表按唤醒时刻升序排列，所以一旦表头都没到期就可以停止。
+ * @note 一次 tick 可能同时叫醒多个任务，因此用 do/while 逐个处理。
  */
 void htTaskCheckDelayedTasks(void)
 {
-	// 确保当前延时列表有效
+	/* 防御：延时链表尚未初始化时直接返回。 */
 	if (pxDelayedTaskList == NULL) {
 		return;
 	}
 
-	// 获取当前滴答计数
+	/* 先取一次 tick 快照，整轮判断都用它，避免中途 tick 变化导致误判。 */
 	TickType_t xCurrentTickCount = xTickCount;
 
-	// 溢出列表要等 tick 回绕交换后才能检查，否则会被提前唤醒。
+	/* 溢出列表要等 tick 回绕交换后才能检查，否则会被提前唤醒。 */
 	if (pxDelayedTaskList->uxNumberOfItems == 0) {
 		return;
 	}
-	// 处理延时到期的任务 - 采用循环检查所有到期任务
+	/* 循环处理所有到期任务：一次 tick 可能唤醒多个。 */
 	htListItem_t *pxItem;
 	htTCB_t *pxTCB;
 	TickType_t xItemValue;
-	BaseType_t xListItemRemoved = htFALSE; // 标记是否从列表中移除了项目
+	BaseType_t xListItemRemoved = htFALSE; /* 本轮是否摘过节点，决定要不要继续循环 */
 
-	// 检查所有已到期的任务
+	/* 逐个检查表头，直到遇到尚未到期的任务。 */
 	do {
 		xListItemRemoved = htFALSE;
 
-		// 获取延时列表中的第一个项目
+		/* 取表头：它是最早到期的任务。 */
 		pxItem = htListGetHead(pxDelayedTaskList);
 		if (pxItem == NULL) {
-			// 列表为空，退出循环
+			/* 链表为空，结束。 */
 			break;
 		}
 
-		// 获取此任务的唤醒时间
+		/* 该链表项的值就是唤醒时刻。 */
 		xItemValue = htListGetItemValue(pxItem);
 
-		// 如果到达或超过唤醒时间
+		/* 已到期才处理；未到期说明后面的都还没到期。 */
 		if (xItemValue <= xCurrentTickCount) {
-			// 获取任务控制块
+			/* 由链表项反查所属 TCB。 */
 			pxTCB = (htTCB_t *)htListGetItemOwner(pxItem);
 			if (pxTCB != NULL) {
-				// 从延时列表移除任务
+				/* 先从延时链表摘下。 */
 				htListRemove(pxItem);
-				// 超时唤醒时也必须从队列/信号量等待列表中摘除。
+				/* 超时唤醒时也必须从队列/信号量等待列表中摘除。 */
 				htListRemove(&(pxTCB->xEventListItem));
 				xListItemRemoved = htTRUE;
 
-				// 将任务添加回就绪列表
+				/* 再挂回对应优先级的就绪链表尾部。 */
 				if (pxTCB->uxPriority < configMAX_PRIORITIES) {
-					// 更新任务状态
+					/* 状态改回就绪。 */
 					pxTCB->uxTaskState = HT_TASK_READY;
 
-					// 设置就绪列表为容器并添加到列表
+					/* 把容器指针指向就绪链表，再插入链表尾部。 */
 					pxItem->pxContainer = &(pxReadyTasksLists[pxTCB->uxPriority]);
 					htListInsertEnd(&(pxReadyTasksLists[pxTCB->uxPriority]), pxItem);
 				}
 			} else {
-				// 无效任务，移除并继续
+				/* 属主非法：丢掉这个坏节点，继续处理下一个。 */
 				htListRemove(pxItem);
 				xListItemRemoved = htTRUE;
 			}
 		}
 
-		// 如果从列表中移除了项目，重新检查，因为可能有多个项目到期
+		/* 只要本轮摘过节点就再查一次：可能还有同一时刻到期的任务。 */
 	} while (xListItemRemoved == htTRUE);
 }
 
 /**
- * System tick processing function - simplified output
+ * @brief 系统滴答处理：递增 tick、处理回绕、扫描延时任务并按需请求切换。
+ *
+ * @note 全程关中断执行，返回前才重新开中断；由 SysTick 中断调用。
+ * @note tick 回绕时交换两条延时链表，使跨越回绕点的任务成为当前链表成员。
  */
 void htTaskTickInc(void)
 {
-	// 确保原子操作
+	/* 整段处理在关中断下完成，保证 tick 递增与延时时序一致。 */
 	__disable_irq();
 
-	// 递增系统滴答计数
+	/* 递增系统滴答计数。 */
 	xTickCount++;
 	if (xTickCount == 0U) {
-		// tick 回绕后，之前跨越回绕点的任务成为当前延时任务。
+		/* tick 回绕后，之前跨越回绕点的任务成为当前延时任务。 */
 		htList_t *pxTemporary = pxDelayedTaskList;
 		pxDelayedTaskList = pxOverflowDelayedTaskList;
 		pxOverflowDelayedTaskList = pxTemporary;
 	}
 
-	// 检查延时任务
+	/* 把所有到期任务搬回就绪链表。 */
 	htTaskCheckDelayedTasks();
 
-	// 如果当前任务有效，检查是否需要调度
+	/* 有任务在跑且确实需要切换时，置位 PendSV。 */
 	if (pxCurrentTCB != NULL) {
 		if (htSchedulerNeedsSwitch()) {
-			// 触发PendSV中断进行任务切换
+			/* 置 PENDSVSET，等中断退出后执行切换。 */
 			SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
 		}
 	}
-	// 重新启用中断
+	/* 重新开中断。 */
 	__enable_irq();
 }
 
 /**
- * 删除任务
+ * @brief 删除任务并释放其占用的资源。
+ *
+ * @param[in] xTaskToDelete 任务句柄；NULL 表示删除当前任务自己。
+ *
+ * @note 删除别的任务可以立即释放；删除自己时不能释放正在使用的栈，只能挂到
+ *       xTasksWaitingTermination，等空闲任务切换后回收。
+ * @warning 删除后句柄立即失效；静态分配的任务其 TCB 与栈不会被释放。
  */
 void htTaskDelete(TaskHandle_t xTaskToDelete)
 {
@@ -955,5 +1251,3 @@ void htTaskDelete(TaskHandle_t xTaskToDelete)
 		htPortFree(pxTCB);
 	}
 }
-
-/* */
