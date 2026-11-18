@@ -197,6 +197,22 @@ python <embedded-build-check>/scripts/build_router.py build --config codex_build
 
 `tests/stubs/` 中的 CMSIS 头文件只用于编译门禁，不模拟中断、寄存器或上下文切换。
 
+## 代码注释约定
+
+全仓库统一使用 Doxygen 风格注释，正文为简体中文，文件编码 UTF-8（无 BOM）：
+
+- 每个 `.c`/`.h` 文件开头是 `@file` + `@brief` 文件头；函数写明 `@brief`、`@param[in/out]` 与 `@return`，需要注意的语义用 `@note`，会崩溃或会阻塞的坑用 `@warning`。
+- 结构体成员和枚举值用行尾 `/**< ... */`，宏用上方的 `/** ... */`。
+- 不使用 `//` 行注释。
+- 类型名、函数名、寄存器名保留英文，只把说明文字写成中文。
+- `.clang-format` 中设置了 `ReflowComments: false`：中文按字符数折行会算错宽度，注释版式由作者控制，代码缩进仍交给 clang-format。
+
+提交前可以自检：脚本会把每个文件的注释剥离后与 `HEAD` 比较，要求代码逐字节不变，并检查编码、`//` 残留和 `@file`/`@brief` 是否存在。
+
+```bash
+python scripts/check_comments.py include/httask.h kernel/httask.c
+```
+
 ## 目录结构
 
 ```text
@@ -204,6 +220,7 @@ HTOS/
 ├── include/                 公开 API 与配置
 ├── kernel/                  任务、调度、队列、同步与 TLSF
 ├── portable/Cortex-M/       Cortex-M3 上下文切换端口
+├── scripts/                 仓库自检脚本（注释规范）
 ├── tests/                   跨平台主机回归测试
 ├── Trace/coredump/          可选 MCoreDump 集成
 ├── lettershell/             可选 Letter Shell 集成
