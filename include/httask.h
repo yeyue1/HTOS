@@ -64,6 +64,13 @@ TaskHandle_t htTaskCreateStatic(TaskFunction_t pxTaskCode, const char *const pcN
 		void *const pvParameters, UBaseType_t uxPriority, StackType_t *puxStackBuffer, htTCB_t *pxTaskBuffer);
 
 void htTaskDelete(TaskHandle_t xTaskToDelete);
+
+#if (configCHECK_FOR_STACK_OVERFLOW > 0)
+/* 检查任务是否写穿了自己的栈（NULL = 当前任务），写穿则调用钩子 */
+void htTaskCheckStackSentinel(TaskHandle_t xTask);
+/* 栈溢出钩子（弱符号，默认死循环停机） */
+void htStackOverflowHook(TaskHandle_t xTask, const char *pcTaskName);
+#endif
 void htTaskDelay(TickType_t xTicksToDelay);
 BaseType_t htTaskDelayUntil(TickType_t *pxPreviousWakeTime, TickType_t xTimeIncrement);
 UBaseType_t htTaskPriorityGet(TaskHandle_t xTask);
