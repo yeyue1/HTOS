@@ -316,8 +316,8 @@ BaseType_t htprvCreateIdleTask(void)
 				(TaskHandle_t *)&pxIdleTaskTCB);
 #else
 		/* 没有堆：改用内核自己提供的静态存储 */
-		pxIdleTaskTCB = (htTCB_t *)htTaskCreateStatic(htprvIdleTask, "IDLE", configMINIMAL_STACK_SIZE, NULL,
-				HT_IDLE_TASK, xIdleStackBuffer, &xIdleTaskTCB);
+		pxIdleTaskTCB = (htTCB_t *)htTaskCreateStatic(
+				htprvIdleTask, "IDLE", configMINIMAL_STACK_SIZE, NULL, HT_IDLE_TASK, xIdleStackBuffer, &xIdleTaskTCB);
 		xReturn = (pxIdleTaskTCB != NULL) ? htPASS : htFAIL;
 #endif
 	} else {
