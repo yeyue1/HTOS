@@ -10,7 +10,11 @@ AllowShortFunctionsOnASingleLine: Inline
 AllowShortLoopsOnASingleLine: false
 AlwaysBreakAfterReturnType: None
 BreakBeforeBraces: Linux
+# 每行最多 120 列
 ColumnLimit: 120
+
+# 不重排注释：中文按字符数折行会算错宽度，Doxygen 块需要保留手写版式
+ReflowComments: false
 CommentPragmas: NOLINT:.*
 ContinuationIndentWidth: 8
 DerivePointerAlignment: false
