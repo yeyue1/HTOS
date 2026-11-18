@@ -799,9 +799,7 @@ size_t htGetTotalHeapSize(void)
 
 #else /* configTOTAL_HEAP_SIZE == 0：纯静态分配配置 */
 
-void htMemInit(void)
-{
-}
+void htMemInit(void) {}
 
 void *htPortMalloc(size_t size)
 {
