@@ -289,6 +289,16 @@ static void htprvIdleTask(void *pvParameters)
 	}
 }
 
+#if (configTOTAL_HEAP_SIZE == 0U)
+/*
+ * 纯静态配置下没有堆，内核自己的空闲任务也必须由编译期提供存储。
+ * 这是整个内核唯一自带存储的对象：configMINIMAL_STACK_SIZE 个字 + 一个 TCB。
+ * 省下来的 12 KB 池远大于这点开销，换来的是"堆被完全裁掉仍能调度"。
+ */
+static StackType_t xIdleStackBuffer[configMINIMAL_STACK_SIZE];
+static htTCB_t xIdleTaskTCB;
+#endif
+
 /**
  * 创建空闲任务
  */
@@ -299,10 +309,17 @@ BaseType_t htprvCreateIdleTask(void)
 
 	/* 检查空闲任务是否已经创建 */
 	if (pxIdleTaskTCB == NULL) {
+#if (configTOTAL_HEAP_SIZE > 0U)
 		/* 创建空闲任务，使用最低优先级 */
 		xReturn = htTaskCreate(htprvIdleTask, "IDLE", configMINIMAL_STACK_SIZE, NULL,
 				HT_IDLE_TASK, /* 使用优先级0(最低) */
 				(TaskHandle_t *)&pxIdleTaskTCB);
+#else
+		/* 没有堆：改用内核自己提供的静态存储 */
+		pxIdleTaskTCB = (htTCB_t *)htTaskCreateStatic(htprvIdleTask, "IDLE", configMINIMAL_STACK_SIZE, NULL,
+				HT_IDLE_TASK, xIdleStackBuffer, &xIdleTaskTCB);
+		xReturn = (pxIdleTaskTCB != NULL) ? htPASS : htFAIL;
+#endif
 	} else {
 		/* 空闲任务已经存在 */
 		xReturn = htPASS;
