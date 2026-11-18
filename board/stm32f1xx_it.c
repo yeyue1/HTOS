@@ -1,30 +1,29 @@
 /**
-  ******************************************************************************
-  * @file    board/stm32f1xx_it.c
-  * @brief   Cortex-M exception handlers owned by the board layer.
-  *
-  * ONLY the SysTick handler is defined here, and it is the single tick source of
-  * the system: it forwards to the RTOS tick entry point htSchedulerTickHandler()
-  * and does nothing else that costs time (no printf, no delay, no scheduler
-  * logic of its own).
-  *
-  * PendSV_Handler, SVC_Handler and HardFault_Handler are intentionally NOT
-  * defined here: portable/Cortex-M/htPortContext.c owns them, and the startup
-  * file (gcc/startup_stm32f103xb.s) already provides weak Default_Handler
-  * aliases for every vector, so redefining them would duplicate a symbol.
-  ******************************************************************************
-  */
+ * @file board/stm32f1xx_it.c
+ * @brief 板级层负责的 Cortex-M 异常处理函数。
+ *
+ * 这里只定义 SysTick 一个处理函数，而它正是整个系统唯一的 tick 来源：
+ * 它把节拍转发给 RTOS 的 tick 入口 htSchedulerTickHandler()，除此之外不再
+ * 做任何耗时的动作（不 printf、不延时、也不自己写调度逻辑）。
+ *
+ * PendSV_Handler、SVC_Handler、HardFault_Handler 是刻意不在这里定义的：
+ * 它们由 portable/Cortex-M/htPortContext.c 提供，而启动文件
+ * （gcc/startup_stm32f103xb.s）已经为每个向量提供了弱符号 Default_Handler
+ * 别名，再定义一次会造成符号重复。
+ */
 
 #include "stm32f1xx_hal.h"
 
 #include "htscheduler.h"
 
 /**
-  * @brief  SysTick interrupt: 1 ms time base for the HAL and the only RTOS tick.
-  * @note   HAL_IncTick() keeps HAL_GetTick() alive, which is what the blocking
-  *         USART1 transmit uses for its timeout bound.  It is HAL bookkeeping,
-  *         not a second scheduler tick.
-  */
+ * @brief SysTick 中断：既是 HAL 的 1 ms 时基，也是唯一的 RTOS 节拍。
+ *
+ * @note HAL_IncTick() 让 HAL_GetTick() 继续有效，阻塞式 USART3 发送正是用它
+ *       来限定超时时间。这只是 HAL 的记账，不是第二个调度节拍。
+ * @warning 本函数处于中断上下文：不许 printf、不许 HAL_Delay()、不许任何
+ *          可能阻塞的调用，所以函数体只有两行。
+ */
 void SysTick_Handler(void)
 {
 	HAL_IncTick();
