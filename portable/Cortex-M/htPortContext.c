@@ -1,17 +1,28 @@
 /**
  * @file htPortContext.c
- * @brief GCC/Thumb Cortex-M3 context-switch port.
+ * @brief Cortex-M3 端口层：naked 上下文切换与硬件异常入口（GCC + Thumb）。
+ *
+ * 四段汇编分别负责：启动第一个任务（vPortStartFirstTask + SVC_Handler）、
+ * 任务间切换（PendSV_Handler）、以及硬 fault 现场取证（HardFault_Handler）。
+ * 所有函数都用 naked 属性，保证编译器只发出下面写明的指令，不加序言也不加尾声。
+ *
+ * 异常进入/返回的约定（Cortex-M3）：
+ *   - 异常进入时硬件把 R0-R3、R12、LR、PC、xPSR 共 8 个字压到当时的栈上；
+ *   - 剩下的 R4-R11 是编译器约定的被调用者保存寄存器，必须由软件在这里压栈，
+ *     这就是本文件里 stmdb/ldmia 那 8 个字的唯一含义；
+ *   - EXC_RETURN（LR 的值）第 2 位决定返回后进 Thread 还是 Handler 模式，
+ *     第 3 位决定返回后使用 MSP 还是 PSP。
  */
 
 #include "htPort.h"
 #include "httask.h"
-/* The device header defines IRQn_Type/SCB and pulls the CMSIS core header in. */
+/* 设备头文件定义 IRQn_Type 与 SCB，并顺带把 CMSIS 内核头文件拉进来。 */
 #include HT_PORT_DEVICE_HEADER
 #include HT_PORT_CORE_HEADER
 
 #include <stdint.h>
 
-/* Keep the port independent from a particular libc/newlib header set. */
+/* 自行声明 printf，使移植层不依赖某一套 libc/newlib 头文件。 */
 extern int printf(const char *format, ...);
 
 #if !defined(__GNUC__)
@@ -32,14 +43,20 @@ extern int printf(const char *format, ...);
 																				 "bhs PendSV_StackError\n"
 #endif
 
-/* The first TCB field is pxTopOfStack; the assembly port relies on it. */
+/* TCB 的第一个字段是 pxTopOfStack，下面的汇编直接按这个布局取栈顶。 */
 extern htTCB_t *pxCurrentTCB;
 
 /**
- * Load the reset MSP and enter the first task through SVC.
+ * @brief 装载复位时的 MSP，并通过 SVC 进入第一个任务。
  *
- * This is a naked function so GCC emits exactly the instructions below and
- * does not add a compiler-generated prologue or epilogue.
+ * 第一步 ldr r0,=0xE000ED08 取的是 VTOR（向量表偏移寄存器），
+ * 连续两次解引用后得到的就是向量表第 0 项，即上电时写入的初始栈顶 MSP。
+ * 把 MSP 复位成它，等于把主栈指针退回到调度器启动前的干净状态；
+ * 随后清 BASEPRI、开中断，再执行 svc 0 进入 SVC_Handler。
+ *
+ * @note 本函数用 naked 属性，GCC 只发出下面这些指令，不添编译器序言与尾声。
+ * @warning svc 指令返回后会跳到下方标签 1，即原地死循环：正常路径应当
+ *          在 SVC_Handler 里改成任务上下文，永远不回到这里。
  */
 __attribute__((naked, used, noinline)) void vPortStartFirstTask(void)
 {
@@ -61,8 +78,19 @@ __attribute__((naked, used, noinline)) void vPortStartFirstTask(void)
 }
 
 /**
- * Restore the first task's software-saved registers and return to Thread
- * mode using PSP.  The initial task stack is prepared by htTaskCreate().
+ * @brief 恢复第一个任务的软件保存寄存器，改用 PSP 返回 Thread 模式。
+ *
+ * 寄存器分工：r3 指向 &pxCurrentTCB，r1 是取出的 TCB 指针，
+ * r0 先取 TCB 第一个字段 pxTopOfStack，再由 ldmia r0!,{r4-r11} 弹出
+ * 8 个被调用者保存寄存器并把 r0 顺移 32 字节，随后 msr psp 把它写成任务栈顶。
+ *
+ * movs r0,#2 加 msr control 是把 CONTROL.SPSEL 置 1，让 Thread 模式使用 PSP；
+ * isb 保证 PSP 切换对后续指令立即生效。
+ * 最后把 lr 装成 0xFFFFFFFD（返回 Thread 模式、使用 PSP），bx lr 完成异常返回。
+ *
+ * @note 第一个任务的初始栈帧由 htTaskCreate() 按同样布局准备好，
+ *       所以这里弹出来的 R4-R11 与硬件弹出的 8 个字正好拼成完整现场。
+ * @note r1 为 0 时跳到标签 1 直接 bx lr，不做任何切换，避免空指针解引用。
  */
 __attribute__((naked, used, noinline)) void SVC_Handler(void)
 {
@@ -84,20 +112,31 @@ __attribute__((naked, used, noinline)) void SVC_Handler(void)
 }
 
 /**
- * Save the interrupted task, select the next task in C, then restore its
- * software-saved registers.  Handler mode uses MSP for the temporary push;
- * task stacks remain on PSP.
+ * @brief 保存被打断的任务，用 C 选出下一个任务，再恢复它的软件保存寄存器。
  *
- * Two guards precede the register save, and both are load-bearing:
+ * 现场保存分工（这是整个移植层最需要对齐的部分）：
+ *   - 硬件在异常进入时已经把 R0-R3、R12、LR、PC、xPSR 压到任务栈（PSP）上；
+ *   - mrs r0, psp 取到当前任务栈顶，stmdb r0!,{r4-r11} 再把 8 个被调用者
+ *     保存寄存器压到同一栈上，r0 随之减 32 字节；
+ *   - str r0,[r2] 把新的栈顶写回 TCB 的第一个字段 pxTopOfStack，
+ *     下次切回来时 ldr r0,[r1] 就能原样恢复。
  *
- *   cbz r2, 1f   no current task, so there is nothing to save or restore.
- *   cbz r0, 9f   PSP is zero, i.e. no task context exists yet: the first task
- *                has not been entered through SVC_Handler.  Without this
- *                check stmdb r0! writes to 0xFFFFFFE0 and the core faults.
+ * 调用 C 之前 push {r3,lr}、返回后 pop {r3,lr}：r3 里是 &pxCurrentTCB，
+ * lr 里是 EXC_RETURN，两者都必须跨过 htTaskSwitchContext() 调用存活。
+ * Handler 模式一律用 MSP，所以这两个字压在 MSP 上，不会污染任务栈。
  *
- * Path 9 must return the original EXC_RETURN untouched.  It must not reach the
- * usual orr lr,lr,#0x0D tail, which forces Thread mode back onto PSP; PSP is
- * zero in exactly the situation path 9 exists for.
+ * 恢复阶段：r1 是选出的新 TCB，ldmia r0!,{r4-r11} 弹出 8 个字，
+ * msr psp 换栈，msr control 置 SPSEL=1，isb 生效。
+ *
+ * 保存前有两道 cbz 护栏，缺一不可：
+ *   - cbz r2,1f 当前没有任务，既没东西可存也没东西可恢复；
+ *   - cbz r0,9f PSP 为 0，说明还没有任何任务上下文（第一个任务尚未经
+ *     SVC_Handler 进入）；没有这道检查时 stmdb r0! 会写到 0xFFFFFFE0，
+ *     内核直接进 HardFault。
+ *
+ * @warning 标签 9 必须原样返回最初的 EXC_RETURN，绝不能走到下面
+ *          orr lr,lr,#0x0D 那段尾巴：那里会强制 Thread 模式改用 PSP，
+ *          而 PSP 为 0 恰恰就是标签 9 存在的场景。
  */
 __attribute__((naked, used, noinline)) void PendSV_Handler(void)
 {
@@ -145,7 +184,7 @@ __attribute__((naked, used, noinline)) void PendSV_Handler(void)
 	);
 }
 
-/* Optional architecture hook supplied by Trace/coredump integration. */
+/* 可选的架构钩子，由 Trace/coredump 集成方提供实现，这里是弱声明。 */
 extern int armv7m_hard_fault_exception_hook(void *context) __attribute__((weak));
 
 #ifndef SCB_CFSR_NOCP_Msk
@@ -162,9 +201,18 @@ extern int armv7m_hard_fault_exception_hook(void *context) __attribute__((weak))
 #endif
 
 /**
- * C half of the hard-fault handler.  It intentionally avoids board-specific
- * HAL/GPIO dependencies so the same port can be built with any CMSIS device
- * header.  A project may provide the weak coredump hook when desired.
+ * @brief 硬 fault 处理器的 C 部分：打印现场并解码 CFSR。
+ *
+ * @param[in] fault_args 指向异常栈帧的指针，由 HardFault_Handler 按
+ *                       EXC_RETURN 选择 MSP 或 PSP 后传入。
+ *
+ * fault_args[0..7] 依次是硬件压栈的 R0、R1、R2、R3、R12、LR、PC、xPSR，
+ * 随后再读 SCB 的 CFSR/HFSR/DFSR/AFSR/BFAR/MMFAR 补齐状态寄存器。
+ *
+ * @note 这里故意不依赖板级 HAL/GPIO，同一份移植层配任意 CMSIS 设备头文件都能编译；
+ *       需要落盘 coredump 时由工程实现上面那个弱钩子即可。
+ * @warning 本函数在异常上下文里运行且不会返回：进函数先 __disable_irq()，
+ *          结尾是死循环，因此内部只能用阻塞式 printf，不能有延时或调度调用。
  */
 void HardFault_Handler_C(uint32_t *fault_args)
 {
@@ -222,7 +270,14 @@ void HardFault_Handler_C(uint32_t *fault_args)
 }
 
 /**
- * Select MSP or PSP according to EXC_RETURN and tail-call the C reporter.
+ * @brief 依据 EXC_RETURN 选择 MSP 或 PSP，再尾调用 C 报告函数。
+ *
+ * tst lr,#4 检测 EXC_RETURN 第 2 位：为 1 表示异常发生在 Thread 模式，
+ * 现场在 PSP 上，取 psp；为 0 表示发生在 Handler 模式，现场在 MSP 上，取 msp。
+ * 取到的栈帧放进 r0，然后 ldr r1,=HardFault_Handler_C 并 bx r1 直接跳过去，
+ * 这样 C 函数看到的第一个参数就是正确的栈帧指针。
+ *
+ * @note 用 naked 属性，避免编译器在本函数里压栈而破坏 r0 的传参。
  */
 __attribute__((naked, used, noinline)) void HardFault_Handler(void)
 {

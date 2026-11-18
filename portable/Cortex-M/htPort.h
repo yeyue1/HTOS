@@ -1,6 +1,8 @@
 /**
  * @file htPort.h
- * @brief Cortex-M 特定的移植层定义
+ * @brief Cortex-M 特定的移植层定义。
+ *
+ * 声明上下文切换入口与两个异常处理函数，并给内核头文件、设备头文件的包含方式留出覆盖点。
  */
 #ifndef HT_PORT_H
 #define HT_PORT_H
@@ -9,28 +11,25 @@
 #include <stdint.h>
 
 /*
- * The Cortex-M port is written for the GNU Arm toolchain.  The core header
- * can be overridden by a board-specific CMSIS header when the default M3
- * header is not the right one.
+ * 本移植层按 GNU Arm 工具链编写。当默认的 M3 内核头文件不适用时，
+ * 可由板级 CMSIS 头文件覆盖内核头文件的名字。
  */
 #ifndef HT_PORT_CORE_HEADER
 #define HT_PORT_CORE_HEADER "core_cm3.h"
 #endif
 
 /*
- * The CMSIS core header refers to IRQn_Type and SCB, which are supplied by the
- * device header.  Including the device header first keeps the port buildable on
- * a real target instead of only against the host stubs.  Override this when the
- * board uses a different STM32 family.
+ * CMSIS 内核头文件会引用 IRQn_Type 与 SCB，这两个类型由设备头文件提供。
+ * 先包含设备头文件，移植层才能在真实目标上编译，而不是只能对着主机桩编译。
+ * 若板子换到别的 STM32 系列，覆盖此宏即可。
  */
 #ifndef HT_PORT_DEVICE_HEADER
 #define HT_PORT_DEVICE_HEADER "stm32f1xx.h"
 #endif
 
 /*
- * Stack-range checks are optional because SRAM placement is a linker-script
- * property, not an RTOS invariant.  Enable them per target and provide
- * assembler-compatible integer constants when a cheap guard is desired:
+ * 栈范围检查是可选的：SRAM 的摆放位置属于链接脚本的属性，不是 RTOS 的不变量。
+ * 需要这道廉价护栏时，按目标打开开关并给出汇编可用的整型常量：
  *
  *   -DHT_PORT_VALIDATE_STACK=1
  *   -DHT_PORT_SRAM_START=0x20000000
@@ -50,19 +49,25 @@
 #endif
 
 /**
- * 启动第一个任务
+ * @brief 启动第一个任务。
+ *
+ * @note 由 SVC 指令进入，把 MSP 复位成向量表里记录的初始栈顶，
+ *       再把 PSP 指向第一个任务的栈帧并返回，此后运行在任务上下文。
  */
 void vPortStartFirstTask(void);
 
 /**
- * PendSV中断处理函数
- * 用于任务切换
+ * @brief PendSV 异常处理函数，负责上下文切换。
+ *
+ * @note 全部寄存器操作以 naked 内联汇编实现，函数体不生成编译器序言，
+ *       因此不能把它当普通 C 函数调用。
  */
 void PendSV_Handler(void);
 
 /**
- * SVC中断处理函数
- * 用于启动第一个任务
+ * @brief SVC 异常处理函数，负责启动第一个任务。
+ *
+ * @note 只在 vPortStartFirstTask() 发出 svc 0 之后执行一次。
  */
 void SVC_Handler(void);
 
