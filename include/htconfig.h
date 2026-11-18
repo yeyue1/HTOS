@@ -21,6 +21,10 @@
 #define configGENERATE_RUN_TIME_STATS 0 /* 生成运行时统计信息 */
 #define configUSE_STATS_FORMATTING_FUNCTIONS 0 /* 使用统计信息格式化函数 */
 
+/* 栈溢出检查：每次切换前检查即将被换下的任务栈底 4 个字是否仍为填充值，
+ * 被写穿则调用 htStackOverflowHook()。置 0 可把相关代码从固件里裁掉。 */
+#define configCHECK_FOR_STACK_OVERFLOW 1 /* 1=启用栈溢出检查 */
+
 /* 钩子函数配置 */
 #define configUSE_IDLE_HOOK 0 /* 使用空闲钩子 */
 #define configUSE_TICK_HOOK 0 /* 使用滴答钩子 */

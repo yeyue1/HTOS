@@ -203,6 +203,11 @@ void htTaskSwitchContext(void)
 		return;
 	}
 
+#if (configCHECK_FOR_STACK_OVERFLOW > 0)
+	/* 换下之前先确认它没有写崩自己的栈 */
+	htTaskCheckStackSentinel(pxCurrentTCB);
+#endif
+
 	/* 选择最高优先级的就绪任务 */
 	UBaseType_t uxTopPriority = 0;
 	uint32_t safetyCounter = 0;
