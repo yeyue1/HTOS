@@ -33,6 +33,7 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 
 - 12 KiB 默认 TLSF 堆，按目标指针宽度对齐。
 - 分配大小溢出检查、非法指针防护、重复释放防护和相邻空闲块合并。
+- 释放前校验块的**物理前驱一致性**：`prev_phys_block` 必须满足 `prev + size(prev) == block`（或该块本身就是池内首块）。落在堆内的野指针（任务栈、数据缓冲区里的随机字节）几乎不可能满足该不变式，因此在进入空闲链表之前就被拒绝，不会把仍在使用的内存当作空闲块发出去。
 - `htGetFreeHeapSize()` 和 `htGetMinimumEverFreeHeapSize()` 用于堆使用量观测。
 - 新建任务栈使用 `0xA5A5A5A5` 涂色，`htGetTaskStackHighWaterMark()` 返回历史最小剩余栈，单位为 word。
 - 可选 MCoreDump 和 Letter Shell 目录保留在 `Trace/` 和 `lettershell/`。
@@ -175,7 +176,7 @@ python tests/run_tests.py --build --cc clang
 python tests/run_tests.py --clean
 ```
 
-也可在 `tests/` 目录使用 `make test`。当前主机套件包含 253 个断言，覆盖列表、TLSF 堆、队列/信号量、任务通知、静态对象、递归互斥量、有限超时、tick 回绕、任务状态转换、队列覆盖、栈高水位和栈溢出哨兵。
+也可在 `tests/` 目录使用 `make test`。当前主机套件包含 4103 个断言，覆盖列表、TLSF 堆、队列/信号量、任务通知、静态对象、递归互斥量、有限超时、tick 回绕、任务状态转换、队列覆盖、栈高水位、栈溢出哨兵，以及分配器边界（最大块、完全耗尽、混合尺寸耗尽、对齐、荒谬尺寸、非法释放、伪造块头、碎片合并、随机 churn、峰值水位）。
 
 统一构建入口在 `codex_build.toml`：
 
