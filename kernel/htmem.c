@@ -25,6 +25,13 @@
 #error "TLSF_FL_INDEX_MAX does not cover configTOTAL_HEAP_SIZE"
 #endif
 
+/*
+ * configTOTAL_HEAP_SIZE 为 0 时，整套 TLSF 实现连同 12 KB 的 g_tlsf_heap 一起被
+ * 裁掉。公接口仍保留桩函数，因为内核其余部分（htos.c 的初始化、动态创建接口的
+ * 失败回滚路径）还在引用它们；缺符号会让“纯静态分配”配置直接链接失败。
+ */
+#if (configTOTAL_HEAP_SIZE > 0U)
+
 /**
  * TLSF算法辅助宏定义
  * 用于类型转换和数值比较，增强代码可读性
@@ -789,3 +796,37 @@ size_t htGetTotalHeapSize(void)
 {
 	return configTOTAL_HEAP_SIZE;
 }
+
+#else /* configTOTAL_HEAP_SIZE == 0：纯静态分配配置 */
+
+void htMemInit(void)
+{
+}
+
+void *htPortMalloc(size_t size)
+{
+	(void)size;
+	return NULL;
+}
+
+void htPortFree(void *ptr)
+{
+	(void)ptr;
+}
+
+size_t htGetFreeHeapSize(void)
+{
+	return 0U;
+}
+
+size_t htGetMinimumEverFreeHeapSize(void)
+{
+	return 0U;
+}
+
+size_t htGetTotalHeapSize(void)
+{
+	return 0U;
+}
+
+#endif /* configTOTAL_HEAP_SIZE */

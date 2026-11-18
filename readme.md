@@ -141,6 +141,10 @@ QueueHandle_t samples = htQueueCreateStatic(
 		4U, sizeof(uint32_t), sample_queue_storage, &sample_queue_buffer);
 ```
 
+### 完全去掉堆（纯静态分配）
+
+把 `configTOTAL_HEAP_SIZE` 设为 `0`，整个 TLSF 池连同 12 KB 的 `g_tlsf_heap` 一起被裁掉（相对默认 12 KB 堆的生产固件：bss −12224 B、Flash −1464 B）；`htPortMalloc()` 恒返回 NULL，动态创建接口全部失败，只能用上面的静态接口。内核自己的空闲任务在该配置下改用编译期静态栈，因此系统仍可调度。实板验证：静态队列 + 两个静态任务连续运行 28 s，51/51 行完整上报，`bad=0`、`free_heap=0`。
+
 ## 主机测试
 
 需要 Python 3 和 GCC 或 Clang。
