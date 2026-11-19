@@ -3,3 +3,7 @@ tests/*.pdb
 tests/test_results.txt
 tests/__pycache__/
 .codex/build_logs/
+
+# ---- clangd index cache ----
+# clangd 每次打开工程都会重建这些 .idx 索引，属于本机产物，不得入库。
+.cache/

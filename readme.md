@@ -197,6 +197,8 @@ python <embedded-build-check>/scripts/build_router.py build --config codex_build
 
 `tests/stubs/` 中的 CMSIS 头文件只用于编译门禁，不模拟中断、寄存器或上下文切换。
 
+`clangd` 的索引缓存生成在 `.cache/` 下（每个头文件和源文件一个 `.idx`），属于本机编辑器产物，已在 `.gitignore` 中忽略，不入库。
+
 ## 代码注释约定
 
 全仓库统一使用 Doxygen 风格注释，正文为简体中文，文件编码 UTF-8（无 BOM）：
