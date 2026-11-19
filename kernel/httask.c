@@ -11,13 +11,10 @@
 #include "htmem.h"
 #include "htlist.h"
 #include "htscheduler.h"
+#include "httrace.h"
 #include <string.h>
 #include "stm32f1xx_hal.h"
 #include "core_cm3.h" /* 提供 NVIC 与 ICSR 等内核寄存器定义 */
-
-#if configDEBUG_IDLE_STATS
-#include <stdio.h>
-#endif
 
 /* 全局变量 */
 htTCB_t *pxCurrentTCB = NULL; /* 当前运行的任务 TCB */
@@ -365,7 +362,7 @@ static void htprvIdleTask(void *pvParameters)
 #if configDEBUG_IDLE_STATS
 		static uint32_t idleCounter = 0;
 		if ((++idleCounter % 100000) == 0) {
-			printf("Idle: %lu ticks\r\n", (uint32_t)xTickCount);
+			htTraceValue("[idle] ticks", (uint32_t)xTickCount);
 			idleCounter = 0;
 		}
 #endif

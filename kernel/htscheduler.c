@@ -11,8 +11,8 @@
 #include "httask.h"
 #include "htlist.h"
 #include "stm32f1xx_hal.h"
+#include "httrace.h"
 #include <stddef.h> /* 提供 NULL 定义 */
-#include <stdio.h> /* 提供 printf 定义 */
 #include "core_cm3.h" /* 提供 NVIC 与 SCB 定义 */
 
 /* ------------------------------------------------------------------ */
@@ -96,7 +96,7 @@ void htStartScheduler(void)
 {
 	/* 关键安全检查：一个任务都没有时放弃启动。 */
 	if (pxCurrentTCB == NULL) {
-		printf("FATAL: No tasks available to run!\r\n");
+		htTrace("FATAL: No tasks available to run!\r\n");
 		return;
 	}
 
@@ -108,7 +108,7 @@ void htStartScheduler(void)
 
 	/* 创建空闲任务；失败则放弃启动。 */
 	if (htprvCreateIdleTask() != htPASS) {
-		printf("FATAL: Failed to create idle task!\r\n");
+		htTrace("FATAL: Failed to create idle task!\r\n");
 		return;
 	}
 

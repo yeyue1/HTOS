@@ -9,7 +9,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
 #include "htos.h"
 #include "httask.h"
 #include "htscheduler.h"
@@ -17,6 +16,7 @@
 #include "htqueue.h"
 #include "htsemaphore.h"
 #include "htutils.h"
+#include "httrace.h"
 #include "stm32f1xx.h"
 
 /** 主版本号。 */
@@ -45,6 +45,36 @@ int gOSRunning = 0;
 static TickType_t prvMillisecondsToTicks(uint32_t timeout)
 {
 	return timeout == UINT32_MAX ? htBLOCKED_INDEFINITELY : (TickType_t)htTimeToTicks(timeout);
+}
+
+/* ------------------------------------------------------------------ */
+/* 诊断输出出口                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief 诊断输出的弱符号默认实现：什么也不做。
+ *
+ * 内核只声明出口，不决定落地方式。应用若需要看到诊断信息，实现同名强符号即可，
+ * 链接器会用强符号覆盖这里的空实现。默认空实现保证内核单独编译、主机构建和
+ * 单元测试都不需要额外的桩函数。
+ *
+ * @param[in] pcMessage 被丢弃的诊断字符串。
+ */
+__attribute__((weak)) void htTrace(const char *pcMessage)
+{
+	(void)pcMessage;
+}
+
+/**
+ * @brief “标签 + 数值”诊断输出的弱符号默认实现：什么也不做。
+ *
+ * @param[in] pcTag   被丢弃的标签字符串。
+ * @param[in] ulValue 被丢弃的数值。
+ */
+__attribute__((weak)) void htTraceValue(const char *pcTag, uint32_t ulValue)
+{
+	(void)pcTag;
+	(void)ulValue;
 }
 
 /**
@@ -87,22 +117,22 @@ int htOSInit(void)
 int htOSStart(void)
 {
 	if (!gOSInitialized) {
-		printf("[htOS] System not initialized, initializing now...\r\n");
+		htTrace("[htOS] System not initialized, initializing now...\r\n");
 		if (htOSInit() != 0) {
-			printf("[htOS] Initialization failed!\r\n");
+			htTrace("[htOS] Initialization failed!\r\n");
 			return -1;
 		}
 	}
 
 	/* 已经在运行就直接返回，避免重复启动调度器。 */
 	if (gOSRunning) {
-		printf("[htOS] System already running!\r\n");
+		htTrace("[htOS] System already running!\r\n");
 		return 0;
 	}
 
 	/* 没有任何任务可运行时启动必然失败，提前拦截。 */
 	if (pxCurrentTCB == NULL) {
-		printf("[htOS] ERROR: No tasks available to run!\r\n");
+		htTrace("[htOS] ERROR: No tasks available to run!\r\n");
 		return -1;
 	}
 
