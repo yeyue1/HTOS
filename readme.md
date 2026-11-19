@@ -35,6 +35,7 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 - 分配大小溢出检查、非法指针防护、重复释放防护和相邻空闲块合并。
 - 释放前校验块的**物理前驱一致性**：`prev_phys_block` 必须满足 `prev + size(prev) == block`（或该块本身就是池内首块）。落在堆内的野指针（任务栈、数据缓冲区里的随机字节）几乎不可能满足该不变式，因此在进入空闲链表之前就被拒绝，不会把仍在使用的内存当作空闲块发出去。
 - `htGetFreeHeapSize()` 和 `htGetMinimumEverFreeHeapSize()` 用于堆使用量观测。
+- 固定容量任务心跳监督见 `include/htwatchdog.h`：注册任务后，各任务在有意义的进度点调用 `htWatchdogHeartbeat()`；监控任务仅在 `htWatchdogCheck()` 返回健康时刷新板级 IWDG。首轮检查只建立基线，空注册或任一任务漏报都不健康；删除被监控任务前必须先注销。该机制检查协作式进度，不保证任务结果正确。
 - 新建任务栈使用 `0xA5A5A5A5` 涂色，`htGetTaskStackHighWaterMark()` 返回历史最小剩余栈，单位为 word。
 - 可选 MCoreDump 和 Letter Shell 目录保留在 `Trace/` 和 `lettershell/`。
 - 内核与移植层自身**不调用 `printf`**：诊断文字走 `htTrace()`、诊断数值走 `htTraceValue()`
@@ -95,6 +96,52 @@ logger   r 2 175 0%
 拼接过程不用 `printf`、不申请堆，缓冲区写满即截断，末尾永远保留 `'\0'`；遍历期间关闭中断，
 因此只适合调试输出，不要放在高频路径上。固件侧用 `-DHTOS_STATS_FORMATTING=ON` 打开
 （代价约 696 字节 Flash、RAM 零增量——表缓冲放在调用者栈上）；库默认关闭，关闭时整块代码被裁掉。
+
+## 任务心跳监督与硬件看门狗
+
+任务卡死不会自己报错：优先级最高的任务一旦在某个循环里原地打转，其它任务连 tick 都拿不到。
+本工程用一层很薄的协作式心跳监督把这种失速暴露给 STM32F103 的独立看门狗（IWDG）：
+
+- 内核侧（`include/htwatchdog.h`、`kernel/htwatchdog.c`）只有一张固定容量的注册表，容量由
+  `configWATCHDOG_MAX_TASKS`（默认 8）给出，**不申请任何堆**。
+- `htWatchdogRegister(task)` 注册需要被监督的任务，`htWatchdogUnregister(task)` 注销
+  （删除任务前必须先注销）；重复注册、容量耗尽、注销未注册的任务都返回 `htFAIL`。
+- `htWatchdogHeartbeat()` 由任务在**有意义的进度点**调用，只认当前任务；未被注册的任务调用返回 `htFAIL`。
+- `htWatchdogCheck()` 由监控任务周期调用：首次调用只建立基线并返回 `htFALSE`，其后要求
+  **每个** 已注册任务的计数都前进才返回 `htTRUE`；有任务漏报时不推进快照，因此持续漏报会一直不健康。
+  注册表为空也返回 `htFALSE`。
+- `htWatchdogReset()` 清空注册表，供内核初始化和主机测试使用。
+
+板级复位源留在 `board/`：`board_watchdog_init()` 用 `IWDG_PRESCALER_256` + `Reload = 0x0FFF`
+启动看门狗（LSI 名义 40 kHz 下约 26.2 s，实际窗口随 LSI 偏差伸缩），`board_watchdog_refresh()`
+喂一次狗。内核不碰任何寄存器，因此换 MCU 时只需换这两个函数。
+
+应用侧的接法就是让一个高优先级任务当监工，**它自己不注册、也不给自己报心跳**——
+否则它可以用自己的执行替自己续命，监督便失去意义：
+
+```c
+static void prv_monitor_task(void *param)
+{
+	(void)param;
+	for (;;) {
+		if (htWatchdogCheck() == htTRUE) {
+			board_watchdog_refresh();   /* 只有全体心跳前进才喂狗 */
+		}
+		htTaskDelay(APP_MS_TO_TICKS(500U));
+	}
+}
+```
+
+本工程的 `app/main.c` 就是这个结构：`blink`（低优先级）和 `logger`（普通优先级）各在
+循环末尾报一次心跳，`watchdog` 任务以高优先级每 500 ms 检查一次。整块监督的代价是
+**约 772 字节 Flash、752 字节 RAM**（RAM 是注册表 + 一个 512 字节栈的静态任务）。
+
+验证方式不止“跑起来没复位”：把 `logger` 的心跳停掉后，监控任务连续 30 余次检查都不健康，
+不再喂狗，板子在约 26 s 后被 IWDG 复位；读 `RCC_CSR` 的 `IWDGRSTF` 位可以确认复位源就是看门狗。
+反过来，正常固件连续运行 90 s 以上（远超一个看门狗周期）`IWDGRSTF` 保持为 0。
+
+> 注意：这只检查“任务还在推进”，不检查推进的结果对不对；也不覆盖中断服务程序卡死
+> （SysTick 停摆时心跳同样会停，因而仍会被复位）。
 
 ## 快速上手
 
