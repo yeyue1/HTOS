@@ -154,6 +154,19 @@ void htMemInit(void);
  */
 void *htPortMalloc(size_t size);
 
+#if (configUSE_MALLOC_FAILED_HOOK == 1)
+/**
+ * @brief 内存分配失败钩子。
+ *
+ * @param[in] xWantedSize 本次申请失败的字节数。
+ *
+ * @note 弱符号，默认空实现。每次 htPortMalloc() 因为堆里没有足够大的块而返回
+ *       NULL 时调用一次；请求长度为 0 或长度溢出算调用错误，不触发。
+ * @note 在临界区之外调用，可以安全地做串口输出等动作。
+ */
+void htMallocFailedHook(size_t xWantedSize);
+#endif
+
 /**
  * @brief 释放此前由 htPortMalloc() 分配的块。
  *

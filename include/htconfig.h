@@ -83,7 +83,11 @@
  */
 #define configUSE_TICK_HOOK 0
 
-/** 内存分配失败钩子开关；当前实现从不调用该钩子，置 1 会在下方触发 #error。 */
+/**
+ * 1 = htPortMalloc() 因空间不足返回 NULL 时调用一次 htMallocFailedHook()。
+ * 纯静态配置（configTOTAL_HEAP_SIZE 为 0）下每次分配都必然失败，钩子同样会调用，
+ * 正好用来暴露"以为有堆其实没有"的误用。弱符号，应用提供同名强符号即可接管。
+ */
 #define configUSE_MALLOC_FAILED_HOOK 0
 
 /* ------------------------------------------------------------------ */
@@ -134,10 +138,6 @@
 
 #if (configUSE_STATS_FORMATTING_FUNCTIONS != 0)
 #error "configUSE_STATS_FORMATTING_FUNCTIONS: needs runtime stats, which are not implemented"
-#endif
-
-#if (configUSE_MALLOC_FAILED_HOOK != 0)
-#error "configUSE_MALLOC_FAILED_HOOK: the hook is never called"
 #endif
 
 /**

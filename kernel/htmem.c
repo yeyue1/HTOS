@@ -43,6 +43,21 @@
  * 裁掉。公接口仍保留桩函数，因为内核其余部分（htos.c 的初始化、动态创建接口的
  * 失败回滚路径）还在引用它们；缺符号会让“纯静态分配”配置直接链接失败。
  */
+#if (configUSE_MALLOC_FAILED_HOOK == 1)
+/**
+ * @brief 内存分配失败钩子的弱默认实现：什么也不做。
+ *
+ * @param[in] xWantedSize 本次申请失败的字节数。
+ *
+ * @note 分配失败本就能通过返回值表达，是否当作致命错误交给应用决定，
+ *       所以默认不停机；提供同名强符号即可接管。
+ */
+__attribute__((weak)) void htMallocFailedHook(size_t xWantedSize)
+{
+	(void)xWantedSize;
+}
+#endif
+
 #if (configTOTAL_HEAP_SIZE > 0U)
 
 /**
@@ -968,6 +983,11 @@ void *htPortMalloc(size_t size)
 	}
 
 	htExitCritical();
+
+	/* 走到这里说明堆里确实没有足够大的块；上面的尺寸非法属于调用错误，不触发钩子。 */
+#if (configUSE_MALLOC_FAILED_HOOK == 1)
+	htMallocFailedHook(size);
+#endif
 	return NULL;
 }
 
@@ -1108,7 +1128,12 @@ void htMemInit(void) {}
 
 void *htPortMalloc(size_t size)
 {
+#if (configUSE_MALLOC_FAILED_HOOK == 1)
+	/* 纯静态配置下每一次分配都必然失败，正是最需要让钩子发声的场合。 */
+	htMallocFailedHook(size);
+#else
 	(void)size;
+#endif
 	return NULL;
 }
 
