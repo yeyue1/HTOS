@@ -37,6 +37,12 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 - `htGetFreeHeapSize()` 和 `htGetMinimumEverFreeHeapSize()` 用于堆使用量观测。
 - 新建任务栈使用 `0xA5A5A5A5` 涂色，`htGetTaskStackHighWaterMark()` 返回历史最小剩余栈，单位为 word。
 - 可选 MCoreDump 和 Letter Shell 目录保留在 `Trace/` 和 `lettershell/`。
+- 内核与移植层自身**不调用 `printf`**：诊断文字走 `htTrace()`、诊断数值走 `htTraceValue()`
+  （`include/httrace.h`），硬 fault 现场走 `htFaultReport()`（`portable/Cortex-M/htPort.h`）。
+  三者都是弱符号且自带空默认实现，应用层给出同名强符号即可接管输出；本工程的 `app/main.c`
+  就是这么做的，统一写 RS485 控制台。因此固件不再链接 newlib 的格式化输出机制。
+- 硬 fault 钩子拿到的是一份现场快照（8 个硬件压栈寄存器 + CFSR/HFSR/DFSR/AFSR/BFAR/MMFAR
+  + 解码出的原因标志），移植层不负责把它变成可读文字，文字由应用层决定。
 
 ### 临界区与中断
 

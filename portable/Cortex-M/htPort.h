@@ -71,4 +71,43 @@ void PendSV_Handler(void);
  */
 void SVC_Handler(void);
 
+/**
+ * @brief 硬 fault 现场快照：异常压栈的 8 个寄存器加 SCB 的故障状态寄存器。
+ *
+ * @note ulCore 的固定顺序是 R0、R1、R2、R3、R12、LR、PC、xPSR，与 Cortex-M
+ *       硬件压栈顺序一致，按这个下标取即可，不需要额外的名字表。
+ */
+typedef struct htFaultFrame {
+	uint32_t ulStackPointer; /*!< 异常栈帧的地址，即 ulCore 的来源。 */
+	uint32_t ulCore[8]; /*!< 见 @note：R0 R1 R2 R3 R12 LR PC xPSR。 */
+	uint32_t ulCfsr; /*!< 可配置故障状态寄存器。 */
+	uint32_t ulHfsr; /*!< 硬 fault 状态寄存器。 */
+	uint32_t ulDfsr; /*!< 调试故障状态寄存器。 */
+	uint32_t ulAfsr; /*!< 辅助故障状态寄存器。 */
+	uint32_t ulBfar; /*!< 总线 fault 地址寄存器。 */
+	uint32_t ulMmfar; /*!< 存储器管理 fault 地址寄存器。 */
+	uint32_t ulFaultFlags; /*!< CFSR 里最容易误读的几位，见下面 HT_FAULT_FLAG_*。 */
+} htFaultFrame_t;
+
+/** @brief 协处理器访问错误（CFSR.NOCP）。 */
+#define HT_FAULT_FLAG_NOCP 0x1U
+/** @brief 非法 PC 装入，通常意味着 EXC_RETURN 已被破坏（CFSR.INVPC）。 */
+#define HT_FAULT_FLAG_INVPC 0x2U
+/** @brief 非法状态，最常见的是 Thumb 位被清零（CFSR.INVSTATE）。 */
+#define HT_FAULT_FLAG_INVSTATE 0x4U
+/** @brief 未定义指令（CFSR.UNDEFINSTR）。 */
+#define HT_FAULT_FLAG_UNDEFINSTR 0x8U
+
+/**
+ * @brief 硬 fault 现场的出口钩子。
+ *
+ * @param[in] pxFrame 现场快照，指向的存储不会在调用期间失效。
+ *
+ * @note 移植层提供空默认实现（弱符号）。应用层给出同名强符号即可接管输出，
+ *       内核与移植层因此彻底不依赖 libc 的格式化输出。
+ * @warning 调用时中断已关闭，且本钩子之后就是死循环：实现里不许阻塞、
+ *          不许延时、不许申请内存，也不许返回错误码。
+ */
+void htFaultReport(const htFaultFrame_t *pxFrame);
+
 #endif /* HT_PORT_H */

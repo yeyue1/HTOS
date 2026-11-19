@@ -22,9 +22,6 @@
 
 #include <stdint.h>
 
-/* 自行声明 printf，使移植层不依赖某一套 libc/newlib 头文件。 */
-extern int printf(const char *format, ...);
-
 #if !defined(__GNUC__)
 #error "portable/Cortex-M/htPortContext.c requires GCC-compatible inline assembly"
 #endif
@@ -201,7 +198,19 @@ extern int armv7m_hard_fault_exception_hook(void *context) __attribute__((weak))
 #endif
 
 /**
- * @brief 硬 fault 处理器的 C 部分：打印现场并解码 CFSR。
+ * @brief 硬 fault 现场输出钩子的空默认实现。
+ *
+ * @param[in] pxFrame 现场快照，此处不使用。
+ *
+ * @note 应用层给出同名强符号即可接管输出，见 htPort.h 的说明。
+ */
+__attribute__((weak)) void htFaultReport(const htFaultFrame_t *pxFrame)
+{
+	(void)pxFrame;
+}
+
+/**
+ * @brief 硬 fault 处理器的 C 部分：收集现场并交给 htFaultReport()。
  *
  * @param[in] fault_args 指向异常栈帧的指针，由 HardFault_Handler 按
  *                       EXC_RETURN 选择 MSP 或 PSP 后传入。
@@ -212,7 +221,8 @@ extern int armv7m_hard_fault_exception_hook(void *context) __attribute__((weak))
  * @note 这里故意不依赖板级 HAL/GPIO，同一份移植层配任意 CMSIS 设备头文件都能编译；
  *       需要落盘 coredump 时由工程实现上面那个弱钩子即可。
  * @warning 本函数在异常上下文里运行且不会返回：进函数先 __disable_irq()，
- *          结尾是死循环，因此内部只能用阻塞式 printf，不能有延时或调度调用。
+ *          结尾是死循环，因此现场只能原样交给 htFaultReport() 输出，
+ *          不能在这里做延时、调度或任何内存申请。
  */
 void HardFault_Handler_C(uint32_t *fault_args)
 {
@@ -222,48 +232,40 @@ void HardFault_Handler_C(uint32_t *fault_args)
 		}
 	}
 
-	volatile uint32_t stacked_r0 = fault_args[0];
-	volatile uint32_t stacked_r1 = fault_args[1];
-	volatile uint32_t stacked_r2 = fault_args[2];
-	volatile uint32_t stacked_r3 = fault_args[3];
-	volatile uint32_t stacked_r12 = fault_args[4];
-	volatile uint32_t stacked_lr = fault_args[5];
-	volatile uint32_t stacked_pc = fault_args[6];
-	volatile uint32_t stacked_psr = fault_args[7];
+	htFaultFrame_t xFrame;
+	uint32_t uxIndex;
 
-	volatile uint32_t cfsr = SCB->CFSR;
-	volatile uint32_t hfsr = SCB->HFSR;
-	volatile uint32_t dfsr = SCB->DFSR;
-	volatile uint32_t afsr = SCB->AFSR;
-	volatile uint32_t bfar = SCB->BFAR;
-	volatile uint32_t mmfar = SCB->MMFAR;
+	xFrame.ulStackPointer = (uint32_t)(uintptr_t)fault_args;
+	for (uxIndex = 0U; uxIndex < 8U; uxIndex++) {
+		xFrame.ulCore[uxIndex] = fault_args[uxIndex];
+	}
 
-	printf("\r\n\n[HARDFAULT]\r\n");
-	printf("SP: 0x%08lx\r\n", (unsigned long)(uintptr_t)fault_args);
-	printf("R0: 0x%08lx, R1: 0x%08lx\r\n", (unsigned long)stacked_r0, (unsigned long)stacked_r1);
-	printf("R2: 0x%08lx, R3: 0x%08lx\r\n", (unsigned long)stacked_r2, (unsigned long)stacked_r3);
-	printf("R12: 0x%08lx, LR: 0x%08lx\r\n", (unsigned long)stacked_r12, (unsigned long)stacked_lr);
-	printf("PC: 0x%08lx, PSR: 0x%08lx\r\n", (unsigned long)stacked_pc, (unsigned long)stacked_psr);
-	printf("CFSR: 0x%08lx, HFSR: 0x%08lx\r\n", (unsigned long)cfsr, (unsigned long)hfsr);
-	printf("DFSR: 0x%08lx, AFSR: 0x%08lx\r\n", (unsigned long)dfsr, (unsigned long)afsr);
-	printf("BFAR: 0x%08lx, MMAR: 0x%08lx\r\n", (unsigned long)bfar, (unsigned long)mmfar);
+	xFrame.ulCfsr = SCB->CFSR;
+	xFrame.ulHfsr = SCB->HFSR;
+	xFrame.ulDfsr = SCB->DFSR;
+	xFrame.ulAfsr = SCB->AFSR;
+	xFrame.ulBfar = SCB->BFAR;
+	xFrame.ulMmfar = SCB->MMFAR;
+	xFrame.ulFaultFlags = 0U;
+
+	if ((xFrame.ulCfsr & SCB_CFSR_NOCP_Msk) != 0U) {
+		xFrame.ulFaultFlags |= HT_FAULT_FLAG_NOCP;
+	}
+	if ((xFrame.ulCfsr & SCB_CFSR_INVPC_Msk) != 0U) {
+		xFrame.ulFaultFlags |= HT_FAULT_FLAG_INVPC;
+	}
+	if ((xFrame.ulCfsr & SCB_CFSR_INVSTATE_Msk) != 0U) {
+		xFrame.ulFaultFlags |= HT_FAULT_FLAG_INVSTATE;
+	}
+	if ((xFrame.ulCfsr & SCB_CFSR_UNDEFINSTR_Msk) != 0U) {
+		xFrame.ulFaultFlags |= HT_FAULT_FLAG_UNDEFINSTR;
+	}
 
 	if (armv7m_hard_fault_exception_hook != NULL) {
 		(void)armv7m_hard_fault_exception_hook(fault_args);
 	}
 
-	if ((cfsr & SCB_CFSR_NOCP_Msk) != 0U) {
-		printf("- Coprocessor access error\r\n");
-	}
-	if ((cfsr & SCB_CFSR_INVPC_Msk) != 0U) {
-		printf("- Invalid PC load (EXC_RETURN)\r\n");
-	}
-	if ((cfsr & SCB_CFSR_INVSTATE_Msk) != 0U) {
-		printf("- Invalid state - possible Thumb bit error\r\n");
-	}
-	if ((cfsr & SCB_CFSR_UNDEFINSTR_Msk) != 0U) {
-		printf("- Undefined instruction\r\n");
-	}
+	htFaultReport(&xFrame);
 
 	for (;;) {
 	}
