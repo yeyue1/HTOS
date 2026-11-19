@@ -23,6 +23,7 @@
 #include "htmem.h"
 #include "htos.h"
 #include "httrace.h"
+#include "htutils.h"
 
 /* -------------------------------------------------------------------------- */
 /* 应用配置                                                                   */
@@ -32,9 +33,10 @@
 #define APP_BLINK_HALF_PERIOD_MS 500U /*!< 亮 500 ms、灭 500 ms，合计 1 Hz。 */
 #define APP_LOG_PERIOD_MS 500U /*!< 日志任务周期，单位 ms。 */
 /* 最坏情况的一行："[log] tick=" + 10 位十进制 + " t=" + 10 位 + "ms heap_free=" +
-   10 位 + " heap_min=" + 10 位 + " tasks=" + 10 位 + " last_err=" + 10 位 + CRLF
-   合计 116 字节，因此取 128 留出余量。此值不得小于上述总和。 */
-#define APP_LOG_LINE_BYTES 128U /*!< 日志行缓冲，放在任务自己的栈上。 */
+   10 位 + " heap_min=" + 10 位 + " tasks=" + 10 位 + " last_err=" + 10 位 +
+   " cpu=" + 3 位 + " idle=" + 3 位 + CRLF 合计 133 字节，因此取 160 留出余量。
+   此值不得小于上述总和。 */
+#define APP_LOG_LINE_BYTES 160U /*!< 日志行缓冲，放在任务自己的栈上。 */
 
 /** @brief 把毫秒换算成调度 tick，整数运算，不依赖 libm。 */
 #define APP_MS_TO_TICKS(ms) ((TickType_t)(((uint32_t)(ms) * (uint32_t)configTICK_RATE_HZ) / 1000U))
@@ -361,6 +363,10 @@ static void prv_logger_task(void *param)
 		cursor = prv_u32(cursor, (uint32_t)uxCurrentNumberOfTasks);
 		cursor = prv_str(cursor, " last_err=");
 		cursor = prv_u32(cursor, s_last_error);
+		cursor = prv_str(cursor, " cpu=");
+		cursor = prv_u32(cursor, htGetCPUUsage());
+		cursor = prv_str(cursor, " idle=");
+		cursor = prv_u32(cursor, htGetIdleRunTimePercent());
 		cursor = prv_str(cursor, "\r\n");
 
 		board_console_write(line, (uint32_t)(cursor - line));
