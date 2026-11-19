@@ -98,6 +98,11 @@ void board_console_putc(char c);
  */
 void board_console_write(const char *text, uint32_t length);
 
+/** @brief 启动 IWDG：256 分频、12 位重装，名义约 26.2 s（LSI 40 kHz）。 */
+uint32_t board_watchdog_init(void);
+/** @brief 刷新已启动的 IWDG。 */
+void board_watchdog_refresh(void);
+
 /* -------------------------------------------------------------------------- */
 /* LED                                                                        */
 /* -------------------------------------------------------------------------- */

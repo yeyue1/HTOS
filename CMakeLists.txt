@@ -94,6 +94,7 @@ set(HTOS_HAL_DRIVER_SOURCES
   "${HTOS_HAL_SRC}/stm32f1xx_hal_gpio_ex.c"
   "${HTOS_HAL_SRC}/stm32f1xx_hal_uart.c"
   "${HTOS_HAL_SRC}/stm32f1xx_hal_pwr.c"
+  "${HTOS_HAL_SRC}/stm32f1xx_hal_iwdg.c"
   # stm32f1xx_hal_dma.c is required in addition: stm32f1xx_hal_uart.h refers to
   # DMA_HandleTypeDef unconditionally, so HAL_UART_MODULE_ENABLED cannot be
   # used without the DMA module. If HAL_DMA_MODULE_ENABLED is not defined in

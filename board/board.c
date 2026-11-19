@@ -67,6 +67,7 @@
 
 /* 句柄与状态 ----------------------------------------------------------------- */
 static UART_HandleTypeDef s_console;
+static IWDG_HandleTypeDef s_watchdog;
 static uint32_t s_clock_status = BOARD_CLOCK_ERR_HAL_INIT;
 
 /* -------------------------------------------------------------------------- */
@@ -303,6 +304,35 @@ void board_console_write(const char *text, uint32_t length)
 		text += chunk;
 		length -= chunk;
 	}
+}
+
+/* -------------------------------------------------------------------------- */
+/* 硬件独立看门狗                                                             */
+/* -------------------------------------------------------------------------- */
+/**
+ * @brief 启动 IWDG：256 分频、12 位重装值，喂狗前名义超时约 26.2 s。
+ *
+ * @return 0 表示已启动；非 0 表示 HAL_IWDG_Init() 失败。
+ * @note  一旦启动就无法用软件关闭，只能靠复位清掉；因此本函数只应在
+ *        监控任务与注册表都就绪之后调用一次。
+ */
+uint32_t board_watchdog_init(void)
+{
+	s_watchdog.Instance = IWDG;
+	s_watchdog.Init.Prescaler = IWDG_PRESCALER_256;
+	s_watchdog.Init.Reload = 0x0FFFU;
+	return (HAL_IWDG_Init(&s_watchdog) == HAL_OK) ? 0U : 1U;
+}
+
+/**
+ * @brief 刷新 IWDG 计数器。
+ *
+ * @note 由监控任务在 htWatchdogCheck() 判定健康后调用，任何更早的刷新
+ *       都会让漏报的任务被无条件放行。
+ */
+void board_watchdog_refresh(void)
+{
+	(void)HAL_IWDG_Refresh(&s_watchdog);
 }
 
 /* -------------------------------------------------------------------------- */

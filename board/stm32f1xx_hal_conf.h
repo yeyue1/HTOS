@@ -30,6 +30,7 @@ extern "C" {
 #define HAL_GPIO_MODULE_ENABLED
 #define HAL_UART_MODULE_ENABLED
 #define HAL_PWR_MODULE_ENABLED
+#define HAL_IWDG_MODULE_ENABLED
 
 /* ########################## 强制例外 ###################################### */
 /*
@@ -171,6 +172,10 @@ extern "C" {
 #ifdef HAL_UART_MODULE_ENABLED
 #include "stm32f1xx_hal_uart.h"
 #endif /* HAL_UART_MODULE_ENABLED */
+
+#ifdef HAL_IWDG_MODULE_ENABLED
+#include "stm32f1xx_hal_iwdg.h"
+#endif /* HAL_IWDG_MODULE_ENABLED */
 
 /* 对外宏 --------------------------------------------------------------------*/
 #ifdef USE_FULL_ASSERT
