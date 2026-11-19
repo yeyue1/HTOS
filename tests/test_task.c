@@ -812,7 +812,72 @@ static void test_runtime_stats_accumulate_only_the_delta(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* 8. 测试入口                                                        */
+/* 8. 任务表格式化                                                     */
+/* ------------------------------------------------------------------ */
+
+#if (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
+/**
+ * @brief 任务表为每个任务写一行，内容含名字与状态字母。
+ *
+ * 断言意图：接口不经过 printf，只能靠输出内容验证；这里同时锁住「两个任务都在表里」
+ * 与「整表以换行结尾」，因为上层通常是整块丢给串口。
+ */
+static void test_task_list_writes_one_line_per_task(void)
+{
+	htTCB_t alpha;
+	htTCB_t beta;
+	char buffer[128];
+	size_t used;
+	size_t length;
+
+	reset_test_state();
+	initialise_task(&alpha, "alpha", 2U);
+	initialise_task(&beta, "beta", 1U);
+	alpha.ulRunTimeCounter = 25U;
+	beta.ulRunTimeCounter = 75U;
+
+	used = htTaskList(buffer, sizeof(buffer));
+	length = strlen(buffer);
+	TEST_ASSERT(used > 0U);
+	TEST_ASSERT_EQUAL((int)length, (int)used);
+	TEST_ASSERT(strstr(buffer, "alpha") != NULL);
+	TEST_ASSERT(strstr(buffer, "beta") != NULL);
+	TEST_ASSERT_EQUAL('\n', (int)buffer[length - 1U]);
+	TEST_ASSERT_EQUAL(0, critical_nesting);
+}
+
+/**
+ * @brief 缓冲区不足时按容量截断，且末尾始终留一个结束符。
+ *
+ * 断言意图：这是无 printf 手写拼接最容易出错的地方——越界一格就会踩坏调用方栈，
+ * 因此固定「容量 N 最多写 N-1 个字符 + '\0'」这一条契约。
+ * 另外验证空指针与非法的过小容量返回 0 而不是崩溃。
+ */
+static void test_task_list_truncates_without_overflow(void)
+{
+	htTCB_t alpha;
+	char small[16];
+	size_t used;
+	size_t index;
+
+	reset_test_state();
+	initialise_task(&alpha, "alpha", 2U);
+
+	memset(small, 'x', sizeof(small));
+	used = htTaskList(small, sizeof(small));
+	TEST_ASSERT_EQUAL((int)(sizeof(small) - 1U), (int)used);
+	TEST_ASSERT_EQUAL('\0', (int)small[sizeof(small) - 1U]);
+	for (index = 0U; index < used; index++) {
+		TEST_ASSERT(small[index] != 'x');
+	}
+	TEST_ASSERT_EQUAL(0, critical_nesting);
+
+	TEST_ASSERT_EQUAL(0, (int)htTaskList(NULL, 32U));
+	TEST_ASSERT_EQUAL(0, (int)htTaskList(small, 1U));
+}
+#endif
+/* ------------------------------------------------------------------ */
+/* 9. 测试入口                                                        */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -847,5 +912,9 @@ int main(void)
 	RUN_TEST(test_notify_actions_set_bits_increment_and_overwrite);
 	RUN_TEST(test_runtime_stats_report_no_data_as_zero);
 	RUN_TEST(test_runtime_stats_accumulate_only_the_delta);
+#if (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
+	RUN_TEST(test_task_list_writes_one_line_per_task);
+	RUN_TEST(test_task_list_truncates_without_overflow);
+#endif
 	return UnityEnd();
 }

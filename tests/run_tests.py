@@ -29,10 +29,12 @@ TEST_SPECS = {
             "unity.c",
             "../kernel/httask.c",
             "../kernel/htlist.c",
+            "../kernel/htutils.c",
             "stubs/host_cmsis.c",
         ],
         "extra_flags": [
             "-DHTOS_HOST_TEST",
+            "-DconfigUSE_STATS_FORMATTING_FUNCTIONS=1",
             "-Wno-pointer-to-int-cast",
             "-Wno-int-to-pointer-cast",
             "-Istubs",
