@@ -1159,6 +1159,15 @@ void htTaskCheckDelayedTasks(void)
  * @note 全程关中断执行，返回前才重新开中断；由 SysTick 中断调用。
  * @note tick 回绕时交换两条延时链表，使跨越回绕点的任务成为当前链表成员。
  */
+#if (configUSE_TICK_HOOK == 1)
+/**
+ * @brief 滴答钩子的弱默认实现：什么也不做。
+ *
+ * @note 这里不写成停机循环，因为钩子每毫秒都会走一次；应用提供同名强符号即可接管。
+ */
+__attribute__((weak)) void htTickHook(void) {}
+#endif
+
 void htTaskTickInc(void)
 {
 	/* 整段处理在关中断下完成，保证 tick 递增与延时时序一致。 */
@@ -1172,6 +1181,15 @@ void htTaskTickInc(void)
 		pxDelayedTaskList = pxOverflowDelayedTaskList;
 		pxOverflowDelayedTaskList = pxTemporary;
 	}
+
+#if (configUSE_TICK_HOOK == 1)
+	/*
+	 * 钩子在扫描延时链表之前调用：它看到的是"tick 已经加一、但还没有任何任务
+	 * 因到期而就绪"的时刻，与 FreeRTOS 的 vApplicationTickHook() 次序一致。
+	 * 此处中断仍是关闭的，钩子不得阻塞。
+	 */
+	htTickHook();
+#endif
 
 	/* 把所有到期任务搬回就绪链表。 */
 	htTaskCheckDelayedTasks();

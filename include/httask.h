@@ -313,6 +313,15 @@ void htTaskStartScheduler(void);
  * @brief 递增系统 tick 并处理延时到期任务，由 SysTick 中断调用。
  */
 void htTaskTickInc(void);
+#if (configUSE_TICK_HOOK == 1)
+/**
+ * @brief 滴答钩子，每个 tick 调用一次。
+ *
+ * @note 弱符号，默认空实现。调用点在 SysTick 处理内部且中断处于关闭状态：
+ *       钩子必须短小、不得阻塞、不得调用任何会等待中断的 API。
+ */
+void htTickHook(void);
+#endif
 /**
  * @brief 当前任务主动让出 CPU，触发一次任务切换。
  *

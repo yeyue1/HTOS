@@ -77,7 +77,10 @@
 /** 1 = 空闲任务每轮调用一次 vApplicationIdleHook()，调用方需自行提供该函数。 */
 #define configUSE_IDLE_HOOK 0
 
-/** 滴答钩子开关；当前实现从不调用该钩子，置 1 会在下方触发 #error。 */
+/**
+ * 1 = 每个滴答调用一次 htTickHook()。调用点在 SysTick 处理内部、中断处于关闭状态，
+ * 因此钩子必须短小且不得调用任何可能阻塞的 API。弱符号，应用提供同名强符号即可接管。
+ */
 #define configUSE_TICK_HOOK 0
 
 /** 内存分配失败钩子开关；当前实现从不调用该钩子，置 1 会在下方触发 #error。 */
@@ -131,10 +134,6 @@
 
 #if (configUSE_STATS_FORMATTING_FUNCTIONS != 0)
 #error "configUSE_STATS_FORMATTING_FUNCTIONS: needs runtime stats, which are not implemented"
-#endif
-
-#if (configUSE_TICK_HOOK != 0)
-#error "configUSE_TICK_HOOK: the hook is never called"
 #endif
 
 #if (configUSE_MALLOC_FAILED_HOOK != 0)
