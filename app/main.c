@@ -37,6 +37,9 @@
    " cpu=" + 3 位 + " idle=" + 3 位 + CRLF 合计 133 字节，因此取 160 留出余量。
    此值不得小于上述总和。 */
 #define APP_LOG_LINE_BYTES 160U /*!< 日志行缓冲，放在任务自己的栈上。 */
+/* 任务表：表头 23 字节 + 每任务约 25 字节，三个任务合计不到 100 字节，200 足够。
+   仅当 configUSE_STATS_FORMATTING_FUNCTIONS 为 1 时才会用到。 */
+#define APP_TASK_STATS_BYTES 200U /*!< htTaskList() 的输出缓冲。 */
 
 /** @brief 把毫秒换算成调度 tick，整数运算，不依赖 libm。 */
 #define APP_MS_TO_TICKS(ms) ((TickType_t)(((uint32_t)(ms) * (uint32_t)configTICK_RATE_HZ) / 1000U))
@@ -438,6 +441,19 @@ int main(void)
 	}
 
 	prv_report(" TASKS CREATED= ", (uint32_t)uxCurrentNumberOfTasks, "\r\n");
+
+#if (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
+	{
+		/* 调度器还没启动，此刻各任务都还没跑过，表里的 rt 自然为 0；
+		   它真正的用处是运行期按需调用，这里只是证明接口可用。 */
+		char stats[APP_TASK_STATS_BYTES];
+		size_t used = htTaskList(stats, sizeof(stats));
+
+		APP_PUTS("[stats] task table:\r\n");
+		board_console_write(stats, (uint32_t)used);
+	}
+#endif
+
 	APP_PUTS("[boot] starting scheduler ...\r\n");
 
 	(void)htOSStart();
