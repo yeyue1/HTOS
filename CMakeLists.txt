@@ -162,11 +162,21 @@ target_include_directories(htOS PRIVATE
 # default in include/htconfig.h stays 12 KB; this variable only overrides it.
 set(HTOS_HEAP_BYTES 0 CACHE STRING "TLSF heap size in bytes for the firmware (0 = pure static)")
 
+# --- Task table --------------------------------------------------------------
+# HTOS_STATS_FORMATTING=ON compiles htTaskList() in and makes app/ print the
+# table once at boot. It costs about 680 bytes of Flash and nothing in RAM
+# (the table buffer lives on the caller's stack), so it stays off by default.
+option(HTOS_STATS_FORMATTING "Compile htTaskList() and print it at boot" OFF)
+
 # --- Compile definitions -----------------------------------------------------
 target_compile_definitions(htOS PRIVATE
   STM32F103xB
   USE_HAL_DRIVER
   configTOTAL_HEAP_SIZE=${HTOS_HEAP_BYTES})
+
+if(HTOS_STATS_FORMATTING)
+  target_compile_definitions(htOS PRIVATE configUSE_STATS_FORMATTING_FUNCTIONS=1)
+endif()
 
 # --- Compile flags -----------------------------------------------------------
 target_compile_options(htOS PRIVATE
