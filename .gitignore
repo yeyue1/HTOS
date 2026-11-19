@@ -39,6 +39,10 @@ compile_commands.json
 # ---- Local tooling: 12 skills, NEVER commit ------------------------------
 .dsh/
 
+# ---- clangd index cache --------------------------------------------------
+# clangd 每次打开工程都会重建这些 .idx 索引，属于本机产物，不得入库。
+.cache/
+
 # ---- Editor / OS noise ----
 *.swp
 *~
