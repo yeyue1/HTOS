@@ -43,6 +43,9 @@ TEST_SPECS = {
     "test_utils.out": {
         "sources": ["test_utils.c", "unity.c", "../kernel/htutils.c"],
     },
+    "test_watchdog.out": {
+        "sources": ["test_watchdog.c", "unity.c", "../kernel/htwatchdog.c"],
+    },
 }
 
 
