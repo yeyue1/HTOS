@@ -81,7 +81,7 @@ jobs:
         run: |
           clang-format --dry-run --Werror \
             include/htconfig.h include/htlist.h include/htmem.h include/htqueue.h include/htscheduler.h \
-            include/htsemaphore.h include/httask.h \
+            include/htsemaphore.h include/httask.h include/htos.h \
             include/httypes.h include/htutils.h \
             kernel/htlist.c kernel/htmem.c kernel/htos.c kernel/htqueue.c kernel/htscheduler.c kernel/htsemaphore.c kernel/httask.c kernel/htutils.c \
             portable/Cortex-M/htPort.h portable/Cortex-M/htPortContext.c \
