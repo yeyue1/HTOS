@@ -10,7 +10,8 @@
   2. 检查文件是 UTF-8 且没有 BOM；
   3. 检查没有残留 // 行注释；
   4. 检查文件头有 @file 与 @brief；
-  5. 检查注释里有中文。
+  5. 检查注释里有中文；
+  6. 检查文件以换行结尾（clang 的 -Wnewline-eof）。
 全部通过时退出码为 0，否则为 1。
 """
 import io
@@ -74,6 +75,8 @@ def check(path):
     problems = []
     if raw.startswith(b'\xef\xbb\xbf'):
         problems.append('文件带 BOM')
+    if raw and not raw.endswith(b'\n'):
+        problems.append('文件末尾缺少换行')
     try:
         text = raw.decode('utf-8')
     except UnicodeDecodeError as exc:
