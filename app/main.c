@@ -24,12 +24,17 @@
 #include "htos.h"
 #include "httrace.h"
 #include "htutils.h"
+#include "htwatchdog.h"
 
 /* -------------------------------------------------------------------------- */
 /* 应用配置                                                                   */
 /* -------------------------------------------------------------------------- */
 #define APP_TASK_BLINK_STACK_BYTES 512U /*!< 字节数，RTOS 内部会换算成 word。 */
 #define APP_TASK_LOG_STACK_BYTES 768U /*!< 字节数，要放得下日志行缓冲。 */
+/* 监控任务几乎不用栈，但 htTaskCreateStatic() 要求栈深不小于
+   configMINIMAL_STACK_SIZE（128 word），因此下限就是 512 字节。 */
+#define APP_TASK_MONITOR_STACK_BYTES 512U
+#define APP_WATCHDOG_PERIOD_MS 500U
 #define APP_BLINK_HALF_PERIOD_MS 500U /*!< 亮 500 ms、灭 500 ms，合计 1 Hz。 */
 #define APP_LOG_PERIOD_MS 500U /*!< 日志任务周期，单位 ms。 */
 /* 最坏情况的一行："[log] tick=" + 10 位十进制 + " t=" + 10 位 + "ms heap_free=" +
@@ -64,18 +69,21 @@
 #define APP_ERR_TASK_BLINK 2U
 #define APP_ERR_TASK_LOGGER 3U
 #define APP_ERR_SCHEDULER_START 4U
+#define APP_ERR_TASK_MONITOR 5U
+#define APP_ERR_WATCHDOG 6U
 
 /* -------------------------------------------------------------------------- */
 /* 模块状态                                                                   */
 /* -------------------------------------------------------------------------- */
 static TaskHandle_t s_blink_task = NULL;
 static TaskHandle_t s_logger_task = NULL;
+static TaskHandle_t s_monitor_task = NULL;
 
 /** 最近一次上电自检失败原因；粘滞不清，供日志任务与调试器读取。 */
 static volatile uint32_t s_last_error = APP_ERR_NONE;
 
 /* -------------------------------------------------------------------------- */
-/* 静态存储：两个任务的栈与控制块都在编译期落地，运行期一个字节都不向堆申请    */
+/* 静态存储：三个任务的栈与控制块都在编译期落地，运行期一个字节都不向堆申请    */
 /* -------------------------------------------------------------------------- */
 /* 栈深仍按字节配置，这里除以 sizeof(StackType_t) 换成 htTaskCreateStatic 要求的
    word 数（Cortex-M3 上为 4）。放在 .bss 里，与原来的 12 KB TLSF 池互不重叠。 */
@@ -83,6 +91,8 @@ static StackType_t s_blink_stack[APP_TASK_BLINK_STACK_BYTES / sizeof(StackType_t
 static htTCB_t s_blink_tcb;
 static StackType_t s_logger_stack[APP_TASK_LOG_STACK_BYTES / sizeof(StackType_t)];
 static htTCB_t s_logger_tcb;
+static StackType_t s_monitor_stack[APP_TASK_MONITOR_STACK_BYTES / sizeof(StackType_t)];
+static htTCB_t s_monitor_tcb;
 
 /* -------------------------------------------------------------------------- */
 /* 轻量格式化工具：不调 printf、不碰堆、输出长度有界                          */
@@ -333,6 +343,7 @@ static void prv_blink_task(void *param)
 
 	for (;;) {
 		board_led_toggle();
+		(void)htWatchdogHeartbeat();
 		htTaskDelay(APP_MS_TO_TICKS(APP_BLINK_HALF_PERIOD_MS));
 	}
 }
@@ -373,8 +384,23 @@ static void prv_logger_task(void *param)
 		cursor = prv_str(cursor, "\r\n");
 
 		board_console_write(line, (uint32_t)(cursor - line));
+		(void)htWatchdogHeartbeat();
 
 		htTaskDelay(APP_MS_TO_TICKS(APP_LOG_PERIOD_MS));
+	}
+}
+
+/* -------------------------------------------------------------------------- */
+/* 看门狗监控                                                                 */
+/* -------------------------------------------------------------------------- */
+static void prv_monitor_task(void *param)
+{
+	(void)param;
+	for (;;) {
+		if (htWatchdogCheck() == htTRUE) {
+			board_watchdog_refresh();
+		}
+		htTaskDelay(APP_MS_TO_TICKS(APP_WATCHDOG_PERIOD_MS));
 	}
 }
 
@@ -438,6 +464,22 @@ int main(void)
 	if (s_logger_task == NULL) {
 		s_last_error = APP_ERR_TASK_LOGGER;
 		prv_fatal("logger task", s_last_error);
+	}
+
+	s_monitor_task = htTaskCreateStatic(prv_monitor_task, "watchdog",
+			(uint16_t)(APP_TASK_MONITOR_STACK_BYTES / sizeof(StackType_t)), NULL, (UBaseType_t)HT_HIGH_TASK,
+			s_monitor_stack, &s_monitor_tcb);
+	if (s_monitor_task == NULL) {
+		s_last_error = APP_ERR_TASK_MONITOR;
+		prv_fatal("watchdog task", s_last_error);
+	}
+	if ((htWatchdogRegister(s_blink_task) != htPASS) || (htWatchdogRegister(s_logger_task) != htPASS)) {
+		s_last_error = APP_ERR_WATCHDOG;
+		prv_fatal("watchdog registration", s_last_error);
+	}
+	if (board_watchdog_init() != 0U) {
+		s_last_error = APP_ERR_WATCHDOG;
+		prv_fatal("IWDG init", s_last_error);
 	}
 
 	prv_report(" TASKS CREATED= ", (uint32_t)uxCurrentNumberOfTasks, "\r\n");
