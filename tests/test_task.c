@@ -25,8 +25,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core_cm3.h" /* 主机侧桩：提供 DWT->CYCCNT，用来构造可控的时间差 */
 #include "htlist.h"
 #include "httask.h"
+#include "htutils.h"
 
 /* ------------------------------------------------------------------ */
 /* 1. 测试状态与计数器                                                */
@@ -758,8 +760,59 @@ static void test_notify_actions_set_bits_increment_and_overwrite(void)
 
 	TEST_ASSERT_EQUAL(0, critical_nesting);
 }
+
 /* ------------------------------------------------------------------ */
-/* 7. 测试入口                                                        */
+/* 7. 运行时间统计                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief 一次样本都没有时，三个统计接口必须返回 0 而不是 100。
+ *
+ * 断言意图：0 表示「没有数据」。若在无样本时返回 100% 空闲或 0% 使用率，
+ * 上层会把「还没开始统计」误读成真实负载，因此把这个契约锁死。
+ * @note 本用例必须排在累积用例前面：它依赖计数仍为 0。
+ */
+static void test_runtime_stats_report_no_data_as_zero(void)
+{
+	reset_test_state();
+	TEST_ASSERT_EQUAL(0, htGetIdleRunTimePercent());
+	TEST_ASSERT_EQUAL(0, htGetCPUUsage());
+	TEST_ASSERT_EQUAL(0, htGetRunTimeCounter());
+}
+
+/**
+ * @brief 两次采样之间只把增量记入统计，且回绕时用无符号减法得到正确差值。
+ *
+ * 断言意图：主机侧把 CYCCNT 当成普通内存，直接写值就能构造出确定的周期增量，
+ * 因而可以脱离真实时钟验证「只有增量被累加」和「计数器回绕不算负数」。
+ */
+static void test_runtime_stats_accumulate_only_the_delta(void)
+{
+	uint64_t mark;
+
+	reset_test_state();
+
+	/* 先把基准钉在 0：若此前已有基准，这次采样增量为 0，不会污染结果。 */
+	DWT->CYCCNT = 0U;
+	htRunTimeSample();
+	mark = htGetRunTimeCounter();
+
+	/* 走 5000 个周期后采样，总量应恰好增加 5000。 */
+	DWT->CYCCNT = 5000U;
+	htRunTimeSample();
+	TEST_ASSERT_EQUAL(5000, (int)(uint32_t)(htGetRunTimeCounter() - mark));
+
+	/* 计数器回绕：从 UINT32_MAX 再走 1000 个周期，无符号减法仍得到正的 1000。 */
+	DWT->CYCCNT = 0xFFFFFFFFU;
+	htRunTimeSample();
+	mark = htGetRunTimeCounter();
+	DWT->CYCCNT = 999U; /* 0xFFFFFFFF + 1000 回绕后等于 999 */
+	htRunTimeSample();
+	TEST_ASSERT_EQUAL(1000, (int)(uint32_t)(htGetRunTimeCounter() - mark));
+}
+
+/* ------------------------------------------------------------------ */
+/* 8. 测试入口                                                        */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -792,5 +845,7 @@ int main(void)
 	RUN_TEST(test_stack_sentinel_skips_tasks_without_usable_storage);
 #endif
 	RUN_TEST(test_notify_actions_set_bits_increment_and_overwrite);
+	RUN_TEST(test_runtime_stats_report_no_data_as_zero);
+	RUN_TEST(test_runtime_stats_accumulate_only_the_delta);
 	return UnityEnd();
 }
