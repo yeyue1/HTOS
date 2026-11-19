@@ -204,6 +204,7 @@ python <embedded-build-check>/scripts/build_router.py build --config codex_build
 - 每个 `.c`/`.h` 文件开头是 `@file` + `@brief` 文件头；函数写明 `@brief`、`@param[in/out]` 与 `@return`，需要注意的语义用 `@note`，会崩溃或会阻塞的坑用 `@warning`。
 - 结构体成员和枚举值用行尾 `/**< ... */`，宏用上方的 `/** ... */`。
 - 不使用 `//` 行注释。
+- 文件末尾必须有一个换行，clang 的 `-Wnewline-eof` 会把它当错误。
 - 类型名、函数名、寄存器名保留英文，只把说明文字写成中文。
 - `.clang-format` 中设置了 `ReflowComments: false`：中文按字符数折行会算错宽度，注释版式由作者控制，代码缩进仍交给 clang-format。
 
