@@ -168,11 +168,15 @@ QueueHandle_t samples = htQueueCreateStatic(
 		4U, sizeof(uint32_t), sample_queue_storage, &sample_queue_buffer);
 ```
 
-本工程的 `app/main.c` 即用这套接口创建 `blink` 与 `logger` 两个任务：栈和 `htTCB_t` 都是文件级静态对象，运行期不再向堆申请任何任务存储。实板 30 s 实测堆余量恒定在 11612 B，与动态创建版本的 10036 B 相差 1576 B，正好是两个任务的 TCB 加栈。
+本工程的 `app/main.c` 即用这套接口创建 `blink` 与 `logger` 两个任务：栈和 `htTCB_t` 都是文件级静态对象，运行期不再向堆申请任何任务存储。仅把创建方式换成静态后，实板 30 s 日志里的堆余量就从动态版本的 10036 B 升到 11612 B，差值 1576 B 正好是两个 TCB 加栈；再按下一节把堆整块去掉，SRAM 才算真正收回来。
 
 ### 完全去掉堆（纯静态分配）
 
-把 `configTOTAL_HEAP_SIZE` 设为 `0`，整个 TLSF 池连同 12 KB 的 `g_tlsf_heap` 一起被裁掉（相对默认 12 KB 堆的生产固件：bss −12224 B、Flash −1464 B）；`htPortMalloc()` 恒返回 NULL，动态创建接口全部失败，只能用上面的静态接口。内核自己的空闲任务在该配置下改用编译期静态栈，因此系统仍可调度。实板验证：静态队列 + 两个静态任务连续运行 28 s，51/51 行完整上报，`bad=0`、`free_heap=0`。
+把 `configTOTAL_HEAP_SIZE` 设为 `0`，整个 TLSF 池连同 12 KB 的 `g_tlsf_heap` 一起被裁掉；`htPortMalloc()` 恒返回 NULL，动态创建接口全部失败，只能用上面的静态接口。内核自己的空闲任务在该配置下改用编译期静态栈，因此系统仍可调度。
+
+本仓库的固件构建**默认就是这套纯静态配置**，由 `CMakeLists.txt` 的缓存变量 `HTOS_HEAP_BYTES`（默认 `0`）通过 `-DconfigTOTAL_HEAP_SIZE=` 注入；`include/htconfig.h` 只给这一个宏加了 `#ifndef` 包裹，所以库默认仍是 12 KB，只有构建层显式覆盖时才变。想恢复带堆固件执行 `cmake -DHTOS_HEAP_BYTES=12288 ...` 即可。
+
+相对上一版全部动态创建的固件（text 11116 / bss 15736），纯静态构型的实测尺寸为 text 9424 / bss 5024，即 **Flash −1692 B、SRAM −10712 B**；把 `HTOS_HEAP_BYTES` 改回 12288 重建，尺寸回到 text 11132 / bss 17248，可见差异确实只来自那个池。实板验证：0 堆固件连续运行 30 s，71 行完整上报、`heap_free=0` 恒定、`tasks=3` 含空闲任务、无 fault。
 
 ## 主机测试
 

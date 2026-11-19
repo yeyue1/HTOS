@@ -154,10 +154,19 @@ target_include_directories(htOS PRIVATE
   "${HTOS_CMSIS_DEVICE_INC}"
   "${HTOS_HAL_INC}")
 
+# --- Heap size ---------------------------------------------------------------
+# app/ builds every task from static storage, so the reference firmware needs no
+# heap at all: default 0 removes the whole TLSF pool (g_tlsf_heap) from .bss.
+# Pass -DHTOS_HEAP_BYTES=12288 (or any non-zero size) to keep a heap for
+# dynamic htTaskCreate()/htQueueCreate() calls in application code. The library
+# default in include/htconfig.h stays 12 KB; this variable only overrides it.
+set(HTOS_HEAP_BYTES 0 CACHE STRING "TLSF heap size in bytes for the firmware (0 = pure static)")
+
 # --- Compile definitions -----------------------------------------------------
 target_compile_definitions(htOS PRIVATE
   STM32F103xB
-  USE_HAL_DRIVER)
+  USE_HAL_DRIVER
+  configTOTAL_HEAP_SIZE=${HTOS_HEAP_BYTES})
 
 # --- Compile flags -----------------------------------------------------------
 target_compile_options(htOS PRIVATE

@@ -40,8 +40,16 @@
 /**
  * TLSF 堆总大小，单位字节（12 * 1024 = 12KB）。
  * 任务栈、TCB、队列存储都从这里分配；置 0 时内核编译为纯静态分配版本。
+ *
+ * 本项可用 -DconfigTOTAL_HEAP_SIZE=... 在构建层覆盖：CMakeLists.txt 的
+ * HTOS_HEAP_BYTES 缓存变量就是通过这条路径注入的。之所以单独给它加
+ * #ifndef，是因为这是唯一一个"不同工程需要不同取值"的配置——库默认
+ * 保留 12KB 以兼容动态创建的既有用例，而本仓库的 app/ 已全部改用
+ * htTaskCreateStatic()，固件侧把 HTOS_HEAP_BYTES 设 0 即可整块回收。
  */
+#ifndef configTOTAL_HEAP_SIZE
 #define configTOTAL_HEAP_SIZE (12 * 1024)
+#endif
 
 /* ------------------------------------------------------------------ */
 /* 3. 调试与统计                                                       */
