@@ -319,7 +319,7 @@ static void prv_boot_banner(void)
 	prv_report(" SYSCLK       = ", board_clock_get_sysclk_hz(), " Hz (HSE 8 MHz, PLL x9)\r\n");
 	prv_report(" PCLK1/USART3 = ", board_clock_get_pclk1_hz(), " Hz\r\n");
 	prv_report(" TICK RATE    = ", (uint32_t)configTICK_RATE_HZ, " Hz (SysTick, only tick source)\r\n");
-	prv_report(" APP TASKS    = ", 2U, " (blink 1 Hz, logger 500 ms) + idle\r\n");
+	prv_report(" APP TASKS    = ", 3U, " (blink 1 Hz, logger 500 ms, watchdog 500 ms) + idle\r\n");
 	prv_report(" HEAP         = ", (uint32_t)configTOTAL_HEAP_SIZE, " B TLSF pool (malloc disabled)\r\n");
 	prv_report(" CLOCK STATUS = ", board_clock_status(), " (0 = every HAL step OK)\r\n");
 
