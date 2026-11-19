@@ -18,9 +18,11 @@
 #include <stdint.h>
 
 #include "board.h"
+#include "htPort.h"
 #include "htconfig.h"
 #include "htmem.h"
 #include "htos.h"
+#include "httrace.h"
 
 /* -------------------------------------------------------------------------- */
 /* 应用配置                                                                   */
@@ -151,6 +153,126 @@ static void prv_report(const char *key, uint32_t value, const char *suffix)
 	cursor = prv_str(cursor, suffix);
 
 	board_console_write(line, (uint32_t)(cursor - line));
+}
+
+/**
+ * @brief 把 32 位数写成固定 8 位小写十六进制，并返回新的游标。
+ *
+ * @param[in] cursor 目标游标。
+ * @param[in] value 待输出的数值。
+ * @return 指向已写入内容之后的位置。
+ * @note 不带 0x 前缀，前缀由调用方的键名带出来，这样一张故障现场表能对齐。
+ */
+static char *prv_hex(char *cursor, uint32_t value)
+{
+	uint32_t shift = 32U;
+
+	while (shift > 0U) {
+		uint32_t nibble;
+
+		shift -= 4U;
+		nibble = (value >> shift) & 0xFU;
+		*cursor = (char)((nibble < 10U) ? ('0' + (char)nibble) : ('a' + (char)(nibble - 10U)));
+		cursor++;
+	}
+
+	return cursor;
+}
+
+/**
+ * @brief 打印 " <key><8 位十六进制><suffix>" 并立即送出。
+ *
+ * @param[in] key 键名，含前导空格与 "=0x"。
+ * @param[in] value 待输出的数值。
+ * @param[in] suffix 行尾字符串，通常是 CRLF。
+ */
+static void prv_report_hex(const char *key, uint32_t value, const char *suffix)
+{
+	char line[48]; /* 键名不超过 16 字节，加 8 位十六进制与 CRLF 远小于 48 */
+	char *cursor = line;
+
+	cursor = prv_str(cursor, key);
+	cursor = prv_hex(cursor, value);
+	cursor = prv_str(cursor, suffix);
+
+	board_console_write(line, (uint32_t)(cursor - line));
+}
+
+/* -------------------------------------------------------------------------- */
+/* 内核诊断出口：接管三个弱钩子，全部写 RS485 控制台                          */
+/* -------------------------------------------------------------------------- */
+/**
+ * @brief 内核诊断字符串钩子。
+ *
+ * @param[in] pcMessage 以 NUL 结尾的字符串，内核传的是静态字面量。
+ * @note 内核可能在临界区里调用本钩子，因此这里只做有界的阻塞轮询发送，不碰堆。
+ */
+void htTrace(const char *pcMessage)
+{
+	board_console_write(pcMessage, prv_strlen(pcMessage));
+}
+
+/**
+ * @brief 内核诊断数值钩子，写成 "标签=数值" 一行。
+ *
+ * @param[in] pcTag 标签文本。
+ * @param[in] ulValue 十进制数值。
+ * @warning pcTag 必须短于 80 字节；内核侧只会传固定的短标签。
+ */
+void htTraceValue(const char *pcTag, uint32_t ulValue)
+{
+	char line[96];
+	char *cursor = line;
+
+	cursor = prv_str(cursor, pcTag);
+	cursor = prv_str(cursor, "=");
+	cursor = prv_u32(cursor, ulValue);
+	cursor = prv_str(cursor, "\r\n");
+
+	board_console_write(line, (uint32_t)(cursor - line));
+}
+
+/**
+ * @brief 硬 fault 现场钩子：把移植层收集好的现场打到控制台。
+ *
+ * @param[in] pxFrame 现场快照。
+ * @note 这里是异常上下文的最深处：中断已关，本函数之后就是死循环，
+ *       所以只做阻塞轮询发送，不延时、不申请内存、不做任何调度调用。
+ */
+void htFaultReport(const htFaultFrame_t *pxFrame)
+{
+	APP_PUTS("\r\n[HARDFAULT] ");
+	prv_report_hex("SP=0x", pxFrame->ulStackPointer, "\r\n");
+
+	prv_report_hex(" PC=0x", pxFrame->ulCore[6], "\r\n");
+	prv_report_hex(" LR=0x", pxFrame->ulCore[5], "\r\n");
+	prv_report_hex("PSR=0x", pxFrame->ulCore[7], "\r\n");
+	prv_report_hex(" R0=0x", pxFrame->ulCore[0], "\r\n");
+	prv_report_hex(" R1=0x", pxFrame->ulCore[1], "\r\n");
+	prv_report_hex(" R2=0x", pxFrame->ulCore[2], "\r\n");
+	prv_report_hex(" R3=0x", pxFrame->ulCore[3], "\r\n");
+	prv_report_hex("R12=0x", pxFrame->ulCore[4], "\r\n");
+	prv_report_hex("CFSR=0x", pxFrame->ulCfsr, "\r\n");
+	prv_report_hex("HFSR=0x", pxFrame->ulHfsr, "\r\n");
+	prv_report_hex("DFSR=0x", pxFrame->ulDfsr, "\r\n");
+	prv_report_hex("AFSR=0x", pxFrame->ulAfsr, "\r\n");
+	prv_report_hex("BFAR=0x", pxFrame->ulBfar, "\r\n");
+	prv_report_hex("MMAR=0x", pxFrame->ulMmfar, "\r\n");
+
+	if ((pxFrame->ulFaultFlags & HT_FAULT_FLAG_NOCP) != 0U) {
+		APP_PUTS("- coprocessor access error\r\n");
+	}
+	if ((pxFrame->ulFaultFlags & HT_FAULT_FLAG_INVPC) != 0U) {
+		APP_PUTS("- invalid PC load (EXC_RETURN)\r\n");
+	}
+	if ((pxFrame->ulFaultFlags & HT_FAULT_FLAG_INVSTATE) != 0U) {
+		APP_PUTS("- invalid state, Thumb bit cleared\r\n");
+	}
+	if ((pxFrame->ulFaultFlags & HT_FAULT_FLAG_UNDEFINSTR) != 0U) {
+		APP_PUTS("- undefined instruction\r\n");
+	}
+
+	APP_PUTS("[fault] halted\r\n");
 }
 
 /* -------------------------------------------------------------------------- */
