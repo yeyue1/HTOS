@@ -56,11 +56,18 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 `configUSE_TIME_SLICING`、`configMAX_PRIORITIES`、`configTOTAL_HEAP_SIZE`、
 `configMINIMAL_STACK_SIZE`、`configUSE_TASK_NOTIFICATIONS`、
 `configUSE_RECURSIVE_MUTEXES`、`configSUPPORT_STATIC_ALLOCATION`、`configUSE_IDLE_HOOK`、
-`configCHECK_FOR_STACK_OVERFLOW`。
+`configCHECK_FOR_STACK_OVERFLOW`、`configUSE_TICK_HOOK`、`configUSE_MALLOC_FAILED_HOOK`。
+
+两个钩子都是**弱符号**，不提供同名强符号也能编译通过，默认实现什么也不做：
+
+- `htTickHook()`：每毫秒在 SysTick 内部调用一次，此时中断关闭，因此必须短小、
+  不得调用任何可能阻塞的 API。
+- `htMallocFailedHook(size_t)`：`htPortMalloc()` 因空间不足返回 NULL 时调用一次。
+  纯静态配置（`configTOTAL_HEAP_SIZE` 为 0）下每次分配都必然失败，钩子同样会触发，
+  正好暴露"以为有堆其实没有"的误用。
 
 **尚未实现**的开关会在编译期直接 `#error` 中止，而不是静默忽略：`configUSE_QUEUE_SETS`、
-`configGENERATE_RUN_TIME_STATS`、`configUSE_STATS_FORMATTING_FUNCTIONS`、
-`configUSE_TICK_HOOK`、`configUSE_MALLOC_FAILED_HOOK`。
+`configGENERATE_RUN_TIME_STATS`、`configUSE_STATS_FORMATTING_FUNCTIONS`。
 
 ## 快速上手
 
