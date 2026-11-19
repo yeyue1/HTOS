@@ -81,10 +81,12 @@ jobs:
         run: |
           clang-format --dry-run --Werror \
             include/htconfig.h include/htlist.h include/htmem.h include/htqueue.h include/htscheduler.h \
-            include/htsemaphore.h include/httask.h \
+            include/htsemaphore.h include/httask.h include/htos.h \
             include/httypes.h include/htutils.h \
             kernel/htlist.c kernel/htmem.c kernel/htos.c kernel/htqueue.c kernel/htscheduler.c kernel/htsemaphore.c kernel/httask.c kernel/htutils.c \
             portable/Cortex-M/htPort.h portable/Cortex-M/htPortContext.c \
+            app/main.c \
+            board/board.c board/board.h board/retarget.c board/stm32f1xx_hal_conf.h board/stm32f1xx_it.c \
             tests/stubs/core_cm3.h tests/stubs/stm32f1xx.h tests/stubs/stm32f1xx_hal.h \
             tests/test_example.c tests/test_list.c tests/test_mem.c tests/test_queue.c tests/test_task.c tests/test_utils.c
 

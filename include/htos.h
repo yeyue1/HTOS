@@ -50,8 +50,8 @@ int htOSStart(void);
  * @return 任务句柄，失败返回 NULL。
  * @note 栈大小小于 configMINIMAL_STACK_SIZE 时会被静默抬到最小值。
  */
-TaskHandle_t htOSTaskCreate(const char* name, void (*function)(void*), void* param,
-                  uint32_t stackSize, uint8_t priority);
+TaskHandle_t htOSTaskCreate(
+		const char *name, void (*function)(void *), void *param, uint32_t stackSize, uint8_t priority);
 
 /**
  * @brief 删除任务（兼容旧 API）。
@@ -80,7 +80,7 @@ QueueHandle_t htOSQueueCreate(uint32_t length, uint32_t itemSize);
  * @param[in] timeout 等待超时时间，单位毫秒；传 UINT32_MAX 表示永久阻塞。
  * @return 0 表示成功，非 0 表示失败（超时或参数非法）。
  */
-int htOSQueueSend(QueueHandle_t queue, const void* item, uint32_t timeout);
+int htOSQueueSend(QueueHandle_t queue, const void *item, uint32_t timeout);
 
 /**
  * @brief 从队列接收数据（兼容旧 API）。
@@ -90,7 +90,7 @@ int htOSQueueSend(QueueHandle_t queue, const void* item, uint32_t timeout);
  * @param[in] timeout 等待超时时间，单位毫秒；传 UINT32_MAX 表示永久阻塞。
  * @return 0 表示成功，非 0 表示失败（超时或参数非法）。
  */
-int htOSQueueReceive(QueueHandle_t queue, void* buffer, uint32_t timeout);
+int htOSQueueReceive(QueueHandle_t queue, void *buffer, uint32_t timeout);
 
 /**
  * @brief 创建二值信号量（兼容旧 API）。

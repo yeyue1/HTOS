@@ -17,7 +17,7 @@
 #define __STM32F1xx_HAL_CONF_H
 
 #ifdef __cplusplus
- extern "C" {
+extern "C" {
 #endif
 
 /* ########################## 模块选择 ###################################### */
@@ -61,75 +61,75 @@
 /**
  * @brief 外部高速晶振（HSE）的频率，按本板实际情况设定。
  */
-#if !defined  (HSE_VALUE)
-  #define HSE_VALUE    8000000U /*!< 外部晶振频率（Hz），本板为 8 MHz */
+#if !defined(HSE_VALUE)
+#define HSE_VALUE 8000000U /*!< 外部晶振频率（Hz），本板为 8 MHz */
 #endif /* HSE_VALUE */
 
-#if !defined  (HSE_STARTUP_TIMEOUT)
-  #define HSE_STARTUP_TIMEOUT    100U   /*!< HSE 起振超时（ms） */
+#if !defined(HSE_STARTUP_TIMEOUT)
+#define HSE_STARTUP_TIMEOUT 100U /*!< HSE 起振超时（ms） */
 #endif /* HSE_STARTUP_TIMEOUT */
 
 /**
  * @brief 内部高速振荡器（HSI）的频率。
  */
-#if !defined  (HSI_VALUE)
-  #define HSI_VALUE    8000000U /*!< 内部振荡器频率（Hz） */
+#if !defined(HSI_VALUE)
+#define HSI_VALUE 8000000U /*!< 内部振荡器频率（Hz） */
 #endif /* HSI_VALUE */
 
 /**
  * @brief 内部低速振荡器（LSI）的频率。
  */
-#if !defined  (LSI_VALUE)
- #define LSI_VALUE               40000U    /*!< LSI 典型频率（Hz） */
+#if !defined(LSI_VALUE)
+#define LSI_VALUE 40000U /*!< LSI 典型频率（Hz） */
 #endif /* LSI_VALUE */
 
 /**
  * @brief 外部低速晶振（LSE）的频率。
  */
-#if !defined  (LSE_VALUE)
-  #define LSE_VALUE    32768U /*!< 外部低速晶振频率（Hz） */
+#if !defined(LSE_VALUE)
+#define LSE_VALUE 32768U /*!< 外部低速晶振频率（Hz） */
 #endif /* LSE_VALUE */
 
-#if !defined  (LSE_STARTUP_TIMEOUT)
-  #define LSE_STARTUP_TIMEOUT    5000U   /*!< LSE 起振超时（ms） */
+#if !defined(LSE_STARTUP_TIMEOUT)
+#define LSE_STARTUP_TIMEOUT 5000U /*!< LSE 起振超时（ms） */
 #endif /* LSE_STARTUP_TIMEOUT */
 
 /* ########################### 系统配置 ##################################### */
 /**
  * @brief HAL 系统级配置。
  */
-#define  VDD_VALUE                    3300U /*!< 供电电压 VDD（mV） */
-#define  TICK_INT_PRIORITY            15U   /*!< HAL 时基中断优先级（最低） */
-#define  USE_RTOS                     0U
-#define  PREFETCH_ENABLE              1U
+#define VDD_VALUE 3300U /*!< 供电电压 VDD（mV） */
+#define TICK_INT_PRIORITY 15U /*!< HAL 时基中断优先级（最低） */
+#define USE_RTOS 0U
+#define PREFETCH_ENABLE 1U
 
 /*
  * 全部回调注册开关保持 0：本工程用不到 HAL 的"注册回调"机制，
  * 关掉可以省掉每个外设句柄里的函数指针表和相应 ROM。
  */
-#define  USE_HAL_ADC_REGISTER_CALLBACKS         0U
-#define  USE_HAL_CAN_REGISTER_CALLBACKS         0U
-#define  USE_HAL_CEC_REGISTER_CALLBACKS         0U
-#define  USE_HAL_DAC_REGISTER_CALLBACKS         0U
-#define  USE_HAL_ETH_REGISTER_CALLBACKS         0U
-#define  USE_HAL_HCD_REGISTER_CALLBACKS         0U
-#define  USE_HAL_I2C_REGISTER_CALLBACKS         0U
-#define  USE_HAL_I2S_REGISTER_CALLBACKS         0U
-#define  USE_HAL_MMC_REGISTER_CALLBACKS         0U
-#define  USE_HAL_NAND_REGISTER_CALLBACKS        0U
-#define  USE_HAL_NOR_REGISTER_CALLBACKS         0U
-#define  USE_HAL_PCCARD_REGISTER_CALLBACKS      0U
-#define  USE_HAL_PCD_REGISTER_CALLBACKS         0U
-#define  USE_HAL_RTC_REGISTER_CALLBACKS         0U
-#define  USE_HAL_SD_REGISTER_CALLBACKS          0U
-#define  USE_HAL_SMARTCARD_REGISTER_CALLBACKS   0U
-#define  USE_HAL_IRDA_REGISTER_CALLBACKS        0U
-#define  USE_HAL_SRAM_REGISTER_CALLBACKS        0U
-#define  USE_HAL_SPI_REGISTER_CALLBACKS         0U
-#define  USE_HAL_TIM_REGISTER_CALLBACKS         0U
-#define  USE_HAL_UART_REGISTER_CALLBACKS        0U
-#define  USE_HAL_USART_REGISTER_CALLBACKS       0U
-#define  USE_HAL_WWDG_REGISTER_CALLBACKS        0U
+#define USE_HAL_ADC_REGISTER_CALLBACKS 0U
+#define USE_HAL_CAN_REGISTER_CALLBACKS 0U
+#define USE_HAL_CEC_REGISTER_CALLBACKS 0U
+#define USE_HAL_DAC_REGISTER_CALLBACKS 0U
+#define USE_HAL_ETH_REGISTER_CALLBACKS 0U
+#define USE_HAL_HCD_REGISTER_CALLBACKS 0U
+#define USE_HAL_I2C_REGISTER_CALLBACKS 0U
+#define USE_HAL_I2S_REGISTER_CALLBACKS 0U
+#define USE_HAL_MMC_REGISTER_CALLBACKS 0U
+#define USE_HAL_NAND_REGISTER_CALLBACKS 0U
+#define USE_HAL_NOR_REGISTER_CALLBACKS 0U
+#define USE_HAL_PCCARD_REGISTER_CALLBACKS 0U
+#define USE_HAL_PCD_REGISTER_CALLBACKS 0U
+#define USE_HAL_RTC_REGISTER_CALLBACKS 0U
+#define USE_HAL_SD_REGISTER_CALLBACKS 0U
+#define USE_HAL_SMARTCARD_REGISTER_CALLBACKS 0U
+#define USE_HAL_IRDA_REGISTER_CALLBACKS 0U
+#define USE_HAL_SRAM_REGISTER_CALLBACKS 0U
+#define USE_HAL_SPI_REGISTER_CALLBACKS 0U
+#define USE_HAL_TIM_REGISTER_CALLBACKS 0U
+#define USE_HAL_UART_REGISTER_CALLBACKS 0U
+#define USE_HAL_USART_REGISTER_CALLBACKS 0U
+#define USE_HAL_WWDG_REGISTER_CALLBACKS 0U
 
 /* ########################## 断言选择 ###################################### */
 /**
@@ -141,7 +141,7 @@
 /* #define USE_FULL_ASSERT    1U */
 
 /* ################## SPI 外设配置 ########################################## */
-#define USE_SPI_CRC                     0U
+#define USE_SPI_CRC 0U
 
 /* 头文件包含 ----------------------------------------------------------------*/
 /**
@@ -173,7 +173,7 @@
 #endif /* HAL_UART_MODULE_ENABLED */
 
 /* 对外宏 --------------------------------------------------------------------*/
-#ifdef  USE_FULL_ASSERT
+#ifdef USE_FULL_ASSERT
 /**
  * @brief assert_param 宏用于检查函数入参的合法性。
  *
@@ -183,7 +183,7 @@
  */
 #define assert_param(expr) ((expr) ? (void)0U : assert_failed((uint8_t *)__FILE__, __LINE__))
 /* 对外函数 ------------------------------------------------------------------*/
-void assert_failed(uint8_t* file, uint32_t line);
+void assert_failed(uint8_t *file, uint32_t line);
 #else
 /* 空断言：零代码、不引 printf、也不在 Flash 里留任何字符串常量。 */
 #define assert_param(expr) ((void)0U)

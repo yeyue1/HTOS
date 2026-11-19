@@ -42,9 +42,9 @@
  * PB2 悬空时一个字节也收不到。
  * USART3 挂在 APB1 上，因此它的内核时钟是 PCLK1（72 MHz SYSCLK 下为 36 MHz）。
  * -------------------------------------------------------------------------- */
-#define BOARD_CONSOLE_UART              USART3
-#define BOARD_CONSOLE_DE_GPIO_PORT      GPIOB
-#define BOARD_CONSOLE_DE_PIN            GPIO_PIN_2
+#define BOARD_CONSOLE_UART USART3
+#define BOARD_CONSOLE_DE_GPIO_PORT GPIOB
+#define BOARD_CONSOLE_DE_PIN GPIO_PIN_2
 
 /* -------------------------------------------------------------------------- */
 /* LED                                                                        */
@@ -59,11 +59,11 @@
  * 注意：PC13 属于低驱动能力的 "TAMPER-RTC" 域，不能灌太大电流；板载 LED 只有
  * 几个 mA，本来就是为它设计的。
  * -------------------------------------------------------------------------- */
-#define BOARD_LED_GPIO_PORT             GPIOC
-#define BOARD_LED_GPIO_CLK_ENABLE()     __HAL_RCC_GPIOC_CLK_ENABLE()
-#define BOARD_LED_PIN                   GPIO_PIN_13
-#define BOARD_LED_ON                    GPIO_PIN_RESET /*!< 低电平点亮 */
-#define BOARD_LED_OFF                   GPIO_PIN_SET   /*!< 高电平熄灭 */
+#define BOARD_LED_GPIO_PORT GPIOC
+#define BOARD_LED_GPIO_CLK_ENABLE() __HAL_RCC_GPIOC_CLK_ENABLE()
+#define BOARD_LED_PIN GPIO_PIN_13
+#define BOARD_LED_ON GPIO_PIN_RESET /*!< 低电平点亮 */
+#define BOARD_LED_OFF GPIO_PIN_SET /*!< 高电平熄灭 */
 
 /* 句柄与状态 ----------------------------------------------------------------- */
 static UART_HandleTypeDef s_console;

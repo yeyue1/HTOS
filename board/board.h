@@ -26,7 +26,7 @@ extern "C" {
 /* -------------------------------------------------------------------------- */
 /* 控制台：USART3 走 RS485                                                    */
 /* -------------------------------------------------------------------------- */
-#define BOARD_CONSOLE_BAUDRATE        9600U   /*!< 8N1，无流控 */
+#define BOARD_CONSOLE_BAUDRATE 9600U /*!< 8N1，无流控 */
 /* 阻塞轮询式发送的时间预算必须远大于纯线路时间。9600 8N1 下每个字节约 1.04 ms，
    一条 116 字节的行在空闲 CPU 上就要占用约 121 ms 线路时间；而低优先级的发送者
    在轮询期间还可能被抢占几百毫秒。100 ms 经实测明显不够：在实板上负载较重时，
@@ -36,8 +36,8 @@ extern "C" {
    注意：超时的分块绝不能从头重发——HAL_UART_Transmit() 不会报告已经有多少字节
    移出了移位寄存器，从头重发会让前缀重复。只有 HAL_BUSY（一个字节都还没排队）
    才是可以安全重试的情形。 */
-#define BOARD_CONSOLE_TX_TIMEOUT_MS   1000U   /*!< 单块阻塞发送超时，单位 ms */
-#define BOARD_CONSOLE_TX_RETRIES      3U      /*!< UART 忙时的重试次数 */
+#define BOARD_CONSOLE_TX_TIMEOUT_MS 1000U /*!< 单块阻塞发送超时，单位 ms */
+#define BOARD_CONSOLE_TX_RETRIES 3U /*!< UART 忙时的重试次数 */
 
 /**
  * @brief 建立 72 MHz 时钟树（HSE 8 MHz -> PLL x9）和 1 kHz SysTick 时基。
@@ -67,11 +67,11 @@ uint32_t board_clock_get_pclk1_hz(void);
 uint32_t board_clock_status(void);
 
 /** @brief 时钟初始化各步骤的结果码，由 board_clock_status() 返回。 */
-#define BOARD_CLOCK_OK            0U /*!< 72 MHz 就绪，SysTick 已配置 */
-#define BOARD_CLOCK_ERR_HAL_INIT  1U /*!< HAL_Init() 失败 */
-#define BOARD_CLOCK_ERR_OSC       2U /*!< HAL_RCC_OscConfig() 失败（通常是 HSE 起振） */
-#define BOARD_CLOCK_ERR_CLK       3U /*!< HAL_RCC_ClockConfig() 失败 */
-#define BOARD_CLOCK_ERR_SYSTICK   4U /*!< HAL_SYSTICK_Config() 失败 */
+#define BOARD_CLOCK_OK 0U /*!< 72 MHz 就绪，SysTick 已配置 */
+#define BOARD_CLOCK_ERR_HAL_INIT 1U /*!< HAL_Init() 失败 */
+#define BOARD_CLOCK_ERR_OSC 2U /*!< HAL_RCC_OscConfig() 失败（通常是 HSE 起振） */
+#define BOARD_CLOCK_ERR_CLK 3U /*!< HAL_RCC_ClockConfig() 失败 */
+#define BOARD_CLOCK_ERR_SYSTICK 4U /*!< HAL_SYSTICK_Config() 失败 */
 
 /**
  * @brief 初始化 USART3：PB10 作 TX、PB11 作 RX，波特率 BOARD_CONSOLE_BAUDRATE，

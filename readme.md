@@ -192,7 +192,7 @@ python <embedded-build-check>/scripts/build_router.py build --config codex_build
 - Linux GCC：`-Wall -Wextra -Wpedantic -Werror`。
 - Linux Clang：AddressSanitizer + UndefinedBehaviorSanitizer。
 - Windows Clang：验证测试入口的跨平台性。
-- clang-format、clang-tidy 和 cppcheck：静态质量门禁。
+- clang-format、clang-tidy 和 cppcheck：静态质量门禁。格式门禁覆盖 `include/`（含 `htos.h`）、`kernel/`、`portable/Cortex-M/`、`app/`、`board/` 和 `tests/`，第一方代码全部受管。
 - Cortex-M 边界语法编译：覆盖系统封装、任务、调度器和工具代码。
 
 `tests/stubs/` 中的 CMSIS 头文件只用于编译门禁，不模拟中断、寄存器或上下文切换。
