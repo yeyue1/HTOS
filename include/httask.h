@@ -298,6 +298,20 @@ char *htTaskGetName(TaskHandle_t xTaskToQuery);
  * @return 任务状态，取值为 htTaskStatus_t 之一；句柄无效返回 HT_TASK_INVALID。
  */
 htTaskStatus_t htTaskGetState(TaskHandle_t xTask);
+#if (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
+/**
+ * @brief 把全部任务的状态拼成一张文本表写进调用者提供的缓冲区。
+ *
+ * @param[out] pcWriteBuffer 输出缓冲区，函数会把结果写成以 '\0' 结尾的多行文本。
+ * @param[in]  uxBufferSize  缓冲区容量（字节），始终保留最后一个字节放结束符。
+ * @return 实际写入的字符数（不含结束符）；参数非法或容量不足 1 行时返回 0。
+ * @note 每行格式为 `name state p=<优先级> stk=<栈高水位字> rt=<累计周期数>`。
+ * @note 内部不调用 printf，也不需要堆。缓冲区不够时后面的行被丢弃，不会越界。
+ * @note 遍历期间关闭中断，因此本函数只适合调试输出：缓冲区越大关中断越久，
+ *       不要在高频路径上调用。
+ */
+size_t htTaskList(char *pcWriteBuffer, size_t uxBufferSize);
+#endif
 
 /* ------------------------------------------------------------------ */
 /* 7. 调度与空闲任务                                                    */

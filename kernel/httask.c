@@ -1439,3 +1439,141 @@ uint64_t htGetRunTimeCounter(void)
 
 	return ullTotal;
 }
+
+#if (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
+/* 任务名在表格里占的列宽（字符数），超出部分截断。 */
+#define HT_STATS_NAME_WIDTH 8U
+
+/*
+ * 下面四个追加函数共同维护一个“有界写入”的游标：缓冲区最后一个字节永远留给结束符，
+ * 写满之后的追加请求被静默丢弃，因此调用方拿到的永远是合法 C 字符串。之所以自己拼接
+ * 而不用 snprintf，是因为固件侧已经把 printf 家族整个裁掉，再把它们链回来等于白裁。
+ */
+typedef struct {
+	char *pcBuffer;
+	size_t uxCapacity;
+	size_t uxLength;
+} htStatsWriter_t;
+
+static void prvStatsPutChar(htStatsWriter_t *pxWriter, char cChar)
+{
+	if ((pxWriter->uxLength + 1U) < pxWriter->uxCapacity) {
+		pxWriter->pcBuffer[pxWriter->uxLength] = cChar;
+		pxWriter->uxLength++;
+		pxWriter->pcBuffer[pxWriter->uxLength] = '\0';
+	}
+}
+
+static void prvStatsPutString(htStatsWriter_t *pxWriter, const char *pcText)
+{
+	while (*pcText != '\0') {
+		prvStatsPutChar(pxWriter, *pcText);
+		pcText++;
+	}
+}
+
+static void prvStatsPutUint(htStatsWriter_t *pxWriter, uint32_t ulValue)
+{
+	char cDigits[10];
+	size_t uxCount = 0U;
+
+	do {
+		cDigits[uxCount] = (char)('0' + (char)(ulValue % 10U));
+		uxCount++;
+		ulValue /= 10U;
+	} while (ulValue != 0U);
+
+	while (uxCount > 0U) {
+		uxCount--;
+		prvStatsPutChar(pxWriter, cDigits[uxCount]);
+	}
+}
+
+/* 任务名按固定宽度左对齐输出，超长截断，保证各行还能对齐着看。 */
+static void prvStatsPutName(htStatsWriter_t *pxWriter, const char *pcName)
+{
+	size_t uxIndex = 0U;
+
+	while ((uxIndex < HT_STATS_NAME_WIDTH) && (pcName[uxIndex] != '\0')) {
+		prvStatsPutChar(pxWriter, pcName[uxIndex]);
+		uxIndex++;
+	}
+	while (uxIndex < HT_STATS_NAME_WIDTH) {
+		prvStatsPutChar(pxWriter, ' ');
+		uxIndex++;
+	}
+}
+
+static char prvStatsStateChar(htTaskStatus_t xState)
+{
+	switch (xState) {
+		case HT_TASK_RUNNING:
+			return 'R';
+		case HT_TASK_READY:
+			return 'r';
+		case HT_TASK_BLOCKED:
+			return 'B';
+		case HT_TASK_SUSPENDED:
+			return 'S';
+		default:
+			return '?';
+	}
+}
+
+size_t htTaskList(char *pcWriteBuffer, size_t uxBufferSize)
+{
+	htStatsWriter_t xWriter;
+	htListItem_t *pxItem;
+	htTCB_t *pxTask;
+	uint64_t ullTotal;
+	uint32_t ulPercent;
+	UBaseType_t uxRemaining;
+
+	if ((pcWriteBuffer == NULL) || (uxBufferSize < 2U)) {
+		return 0U;
+	}
+
+	xWriter.pcBuffer = pcWriteBuffer;
+	xWriter.uxCapacity = uxBufferSize;
+	xWriter.uxLength = 0U;
+	pcWriteBuffer[0] = '\0';
+
+	prvStatsPutString(&xWriter, "name     s prio stk rt%\r\n");
+
+	/* 遍历中 tick 处理可能改动链表，整段关中断；因此本函数只适合调试输出。 */
+	htEnterCritical();
+	ullTotal = htGetRunTimeCounter();
+	/* 用「剩余项数」而不是「下一个是否为空」作为循环条件：pxAllocatedTasksList
+	   是自身成环的双向链表，走到表尾后 htListGetNext() 会回到表头，靠空指针
+	   判断会一直转下去。 */
+	uxRemaining = htListGetCurrentNumberOfItems(&pxAllocatedTasksList);
+	pxItem = htListGetHead(&pxAllocatedTasksList);
+	while ((pxItem != NULL) && (uxRemaining > 0U)) {
+		pxTask = (htTCB_t *)htListGetItemOwner(pxItem);
+		pxItem = htListGetNext(pxItem);
+		uxRemaining--;
+		if (pxTask == NULL) {
+			continue;
+		}
+
+		prvStatsPutName(&xWriter, pxTask->pcTaskName);
+		prvStatsPutChar(&xWriter, ' ');
+		prvStatsPutChar(&xWriter, prvStatsStateChar(htTaskGetState((TaskHandle_t)pxTask)));
+		prvStatsPutChar(&xWriter, ' ');
+		prvStatsPutUint(&xWriter, (uint32_t)pxTask->uxPriority);
+		prvStatsPutChar(&xWriter, ' ');
+		prvStatsPutUint(&xWriter, (uint32_t)htGetTaskStackHighWaterMark((TaskHandle_t)pxTask));
+		prvStatsPutChar(&xWriter, ' ');
+		if (ullTotal == 0U) {
+			ulPercent = 0U;
+		} else {
+			ulPercent = (uint32_t)(((uint64_t)pxTask->ulRunTimeCounter * 100U) / ullTotal);
+		}
+		prvStatsPutUint(&xWriter, ulPercent);
+		prvStatsPutString(&xWriter, "%\r\n");
+	}
+	htExitCritical();
+
+	return xWriter.uxLength;
+}
+#endif /* configUSE_STATS_FORMATTING_FUNCTIONS */

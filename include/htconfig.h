@@ -88,8 +88,14 @@
 #define portGET_RUN_TIME_COUNTER_VALUE() (DWT->CYCCNT)
 #endif
 
-/** 统计信息格式化函数开关；格式化接口尚未实现，置 1 会在下方触发 #error。 */
+/**
+ * 1 = 编入 htTaskList()：把全部任务的名称、状态、优先级、栈高水位与累计运行时间
+ * 拼成一张文本表写进调用者给的缓冲区。内部不调用 printf，超出缓冲区的部分直接截断。
+ * 置 0（默认）时整块代码被裁掉，不占 Flash；需要时可用 -D 在构建层打开。
+ */
+#ifndef configUSE_STATS_FORMATTING_FUNCTIONS
 #define configUSE_STATS_FORMATTING_FUNCTIONS 0
+#endif
 
 /**
  * 栈溢出检查：每次任务切换前检查即将被换下的任务栈底 4 个字是否仍为填充值，
@@ -149,7 +155,7 @@
 /**
  * @brief 配置审计：把"设了也没有实现"的开关变成编译期错误。
  *
- * 下面这些开关目前还没有任何 #if 引用它们：无论设成 0 还是 1，生成的固件都完全一样。
+ * 下面这个开关目前还没有任何 #if 引用它：无论设成 0 还是 1，生成的固件都完全一样。
  * 配置项静默失效比缺少该功能更难排查——使用者会以为自己已经关掉了某项功能去省 Flash，
  * 或者以为打开了某个钩子。这里让它们在编译期直接失败，把"没有实现"变成一条明确的编译错误。
  *
@@ -159,8 +165,9 @@
 #error "configUSE_QUEUE_SETS: queue sets are not implemented"
 #endif
 
-#if (configUSE_STATS_FORMATTING_FUNCTIONS != 0)
-#error "configUSE_STATS_FORMATTING_FUNCTIONS: the formatting helpers are not implemented"
+/* 格式化函数要遍历全局任务表，因此依赖 configUSE_TRACE_FACILITY。 */
+#if (configUSE_STATS_FORMATTING_FUNCTIONS == 1) && (configUSE_TRACE_FACILITY == 0)
+#error "configUSE_STATS_FORMATTING_FUNCTIONS requires configUSE_TRACE_FACILITY"
 #endif
 
 /**
