@@ -24,7 +24,13 @@ TEST_SPECS = {
     },
     "test_mem.out": {"sources": ["test_mem.c", "unity.c", "../kernel/htmem.c"]},
     "test_task.out": {
-        "sources": ["test_task.c", "unity.c", "../kernel/httask.c", "../kernel/htlist.c"],
+        "sources": [
+            "test_task.c",
+            "unity.c",
+            "../kernel/httask.c",
+            "../kernel/htlist.c",
+            "stubs/host_cmsis.c",
+        ],
         "extra_flags": [
             "-DHTOS_HOST_TEST",
             "-Wno-pointer-to-int-cast",
