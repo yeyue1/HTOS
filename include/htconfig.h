@@ -58,10 +58,37 @@
 /** 1 = 编入跟踪相关字段（如 TCB 的 ulRunTimeCounter）；当前不控制任何实现分支。 */
 #define configUSE_TRACE_FACILITY 1
 
-/** 运行时统计开关；当前为桩实现，htGetCPUUsage() 恒返回 0，置 1 会在下方触发 #error。 */
-#define configGENERATE_RUN_TIME_STATS 0
+/**
+ * 1 = 编入运行时统计：每毫秒在 SysTick 内部采一次 DWT 周期计数器，把这段时间记到
+ * 当前任务头上，同时累计总时长。htGetCPUUsage()、htGetIdleRunTimePercent()、
+ * htGetRunTimeCounter() 因此返回真实数值；置 0 时三者恒返回 0，采样代码整体裁掉。
+ *
+ * 时间基准是 Cortex-M3 的 DWT->CYCCNT，不额外占用定时器：72 MHz 下一个计数约
+ * 13.9 ns，计数器约 59.6 s 回绕一次，靠无符号减法跨回绕，采样间隔 1 ms 远小于它。
+ * 代价是每毫秒一次计数器读取，外加一次 32 位累加。
+ */
+#define configGENERATE_RUN_TIME_STATS 1
 
-/** 统计信息格式化函数开关；依赖运行时统计，置 1 会在下方触发 #error。 */
+#if (configGENERATE_RUN_TIME_STATS == 1)
+/*
+ * 运行时统计的时间基准由 Cortex-M3 的数据观察点单元提供：它自带一个 32 位周期
+ * 计数器，不占用任何片上定时器。写 DWT 之前必须先置 CoreDebug->DEMCR.TRCENA，
+ * 否则所有 DWT 写入都会被忽略——这是 DWT "配了却没数"最常见的原因。
+ *
+ * 与 FreeRTOS 一样，这两个宏由配置头提供给移植层和内核共用，不写死在某个 .c 里。
+ */
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()                                                                       \
+	do {                                                                                                               \
+		CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;                                                                \
+		DWT->CYCCNT = 0UL;                                                                                             \
+		DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;                                                                           \
+	} while (0)
+
+/** @brief 读取 DWT 周期计数器的当前值；72 MHz 下约 59.6 s 回绕一次。 */
+#define portGET_RUN_TIME_COUNTER_VALUE() (DWT->CYCCNT)
+#endif
+
+/** 统计信息格式化函数开关；格式化接口尚未实现，置 1 会在下方触发 #error。 */
 #define configUSE_STATS_FORMATTING_FUNCTIONS 0
 
 /**
@@ -132,12 +159,8 @@
 #error "configUSE_QUEUE_SETS: queue sets are not implemented"
 #endif
 
-#if (configGENERATE_RUN_TIME_STATS != 0)
-#error "configGENERATE_RUN_TIME_STATS: runtime stats are stubs, htGetCPUUsage() returns 0"
-#endif
-
 #if (configUSE_STATS_FORMATTING_FUNCTIONS != 0)
-#error "configUSE_STATS_FORMATTING_FUNCTIONS: needs runtime stats, which are not implemented"
+#error "configUSE_STATS_FORMATTING_FUNCTIONS: the formatting helpers are not implemented"
 #endif
 
 /**
