@@ -12,6 +12,7 @@
 #include "htlist.h"
 #include "htscheduler.h"
 #include "httrace.h"
+#include "htutils.h"
 #include <string.h>
 #include "stm32f1xx_hal.h"
 #include "core_cm3.h" /* 提供 NVIC 与 ICSR 等内核寄存器定义 */
@@ -386,6 +387,11 @@ static htTCB_t xIdleTaskTCB;
  *
  * @note 用函数内的静态变量记住 TCB，保证只创建一次。
  */
+#if (configGENERATE_RUN_TIME_STATS == 1)
+/** @brief 空闲任务的控制块，运行时间统计用它把空闲时间单独记账。 */
+static TaskHandle_t s_xIdleTaskHandle = NULL;
+#endif
+
 BaseType_t htprvCreateIdleTask(void)
 {
 	BaseType_t xReturn = htFAIL;
@@ -409,8 +415,19 @@ BaseType_t htprvCreateIdleTask(void)
 		xReturn = htPASS;
 	}
 
+#if (configGENERATE_RUN_TIME_STATS == 1)
+	s_xIdleTaskHandle = (TaskHandle_t)pxIdleTaskTCB;
+#endif
+
 	return xReturn;
 }
+
+#if (configGENERATE_RUN_TIME_STATS == 1)
+TaskHandle_t htTaskGetIdleHandle(void)
+{
+	return s_xIdleTaskHandle;
+}
+#endif
 
 #if (configCHECK_FOR_STACK_OVERFLOW > 0)
 /**
@@ -1191,6 +1208,14 @@ void htTaskTickInc(void)
 	htTickHook();
 #endif
 
+	/*
+	 * 把刚刚过去的这一个 tick 记到正在运行的任务头上。采样放在切换之前，
+	 * 因此记的正是"过去 1 ms 里真正占用 CPU 的那个任务"。
+	 */
+#if (configGENERATE_RUN_TIME_STATS == 1)
+	htRunTimeSample();
+#endif
+
 	/* 把所有到期任务搬回就绪链表。 */
 	htTaskCheckDelayedTasks();
 
@@ -1265,4 +1290,152 @@ void htTaskDelete(TaskHandle_t xTaskToDelete)
 		htPortFree(pxTCB->pxStack);
 		htPortFree(pxTCB);
 	}
+}
+
+/* ------------------------------------------------------------------ */
+/* 运行时间统计                                                         */
+/* ------------------------------------------------------------------ */
+/*
+ * 统计必须跟着滴答走，也要直接读当前任务的 TCB，因此实现在本文件而不是
+ * kernel/htutils.c；include/htutils.h 只负责声明。
+ */
+
+#if (configGENERATE_RUN_TIME_STATS == 1)
+
+/** @brief 上一次采样时周期计数器的读数。 */
+static uint32_t s_ulLastSampleCycles;
+/** @brief 自启动以来累计的周期数，是所有任务运行时间之和。 */
+static uint64_t s_ullTotalCycles;
+/** @brief 其中记在空闲任务头上的周期数。 */
+static uint64_t s_ullIdleCycles;
+/** @brief 时间基准是否就绪；0 表示下一次采样只用来建立基准。 */
+static uint8_t s_ucTimerReady;
+
+/**
+ * @brief 采样一次运行时间，把刚过去的一个 tick 记到当前任务头上。
+ *
+ * @note 由 htTaskTickInc() 在关中断状态下每毫秒调用一次，应用不要直接调用。
+ * @note 第一次调用只打开周期计数器并记下基准，启动阶段的时间不计入任何任务。
+ * @note 两次采样之间 32 位计数器的回绕是安全的：无符号减法自动得到正确增量，
+ *       前提是采样间隔远小于回绕周期（72 MHz 下约 59.6 s）。
+ */
+void htRunTimeSample(void)
+{
+	uint32_t ulNow;
+	uint32_t ulDelta;
+
+	if (s_ucTimerReady == 0U) {
+		portCONFIGURE_TIMER_FOR_RUN_TIME_STATS();
+		s_ulLastSampleCycles = portGET_RUN_TIME_COUNTER_VALUE();
+		s_ucTimerReady = 1U;
+		return;
+	}
+
+	ulNow = portGET_RUN_TIME_COUNTER_VALUE();
+	/* 无符号相减，计数器回绕时结果依然正确。 */
+	ulDelta = ulNow - s_ulLastSampleCycles;
+	s_ulLastSampleCycles = ulNow;
+
+	s_ullTotalCycles += ulDelta;
+	if (pxCurrentTCB != NULL) {
+		pxCurrentTCB->ulRunTimeCounter += ulDelta;
+		if ((TaskHandle_t)pxCurrentTCB == htTaskGetIdleHandle()) {
+			s_ullIdleCycles += ulDelta;
+		}
+	}
+}
+
+/**
+ * @brief 取一份总时长与空闲时长的快照。
+ *
+ * @param[out] pullTotal 自启动以来的累计周期数。
+ * @param[out] pullIdle  其中空闲任务占用的周期数。
+ * @note 两个 64 位量在 32 位机上是分几次读出的，中断是毫秒级的采样点，
+ *       这里先存下 PRIMASK 再关中断，读完按原值恢复——即便调用方本身就处在
+ *       临界区内，也不会被提前打开中断。
+ */
+static void prvReadRunTimeCounters(uint64_t *pullTotal, uint64_t *pullIdle)
+{
+	const uint32_t ulPrimask = __get_PRIMASK();
+
+	__disable_irq();
+	*pullTotal = s_ullTotalCycles;
+	*pullIdle = s_ullIdleCycles;
+	__set_PRIMASK(ulPrimask);
+}
+
+#endif /* configGENERATE_RUN_TIME_STATS */
+
+/**
+ * @brief 获取空闲任务占用 CPU 时间的百分比。
+ *
+ * @return 0~100 的百分比；还没有样本时返回 0。
+ * @note 返回值是"自启动以来的平均值"，不是最近一段时间的使用率。
+ * @note configGENERATE_RUN_TIME_STATS 为 0 时恒返回 0，表示没有这项数据，
+ *       而不是表示系统一直空闲。
+ */
+uint32_t htGetIdleRunTimePercent(void)
+{
+	uint64_t ullTotal;
+	uint64_t ullIdle;
+
+#if (configGENERATE_RUN_TIME_STATS == 1)
+	prvReadRunTimeCounters(&ullTotal, &ullIdle);
+#else
+	ullTotal = 0U;
+	ullIdle = 0U;
+#endif
+
+	if (ullTotal == 0U) {
+		/* 还没有样本：返回 0 而不是 100%，避免把"没有数据"误报成"一直空闲"。 */
+		return 0U;
+	}
+	return (uint32_t)((ullIdle * 100U) / ullTotal);
+}
+
+/**
+ * @brief 获取 CPU 使用率。
+ *
+ * @return 0~100 的百分比，等于 100 减去空闲占比。
+ * @note 与空闲占比一样，是自启动以来的平均值；统计关闭时返回 0。
+ */
+uint32_t htGetCPUUsage(void)
+{
+#if (configGENERATE_RUN_TIME_STATS == 1)
+	uint64_t ullTotal;
+	uint64_t ullIdle;
+	uint32_t ulIdlePercent;
+
+	prvReadRunTimeCounters(&ullTotal, &ullIdle);
+	if (ullTotal == 0U) {
+		/* 还没有样本：与空闲占比一致地返回 0，而不是 100% 满载。 */
+		return 0U;
+	}
+	ulIdlePercent = (uint32_t)((ullIdle * 100U) / ullTotal);
+	return (ulIdlePercent >= 100U) ? 0U : (100U - ulIdlePercent);
+#else
+	return 0U;
+#endif
+}
+
+/**
+ * @brief 获取自启动以来累计的运行时间计数。
+ *
+ * @return 累计的周期数；72 MHz 下除以 72000 即得毫秒数。
+ * @note 统计关闭时返回 0。需要 tick 级时间时请改用 xTickCount 或 htTicksToTime()。
+ */
+uint64_t htGetRunTimeCounter(void)
+{
+	uint64_t ullTotal;
+	uint64_t ullIdle;
+
+#if (configGENERATE_RUN_TIME_STATS == 1)
+	prvReadRunTimeCounters(&ullTotal, &ullIdle);
+	(void)ullIdle;
+#else
+	ullTotal = 0U;
+	ullIdle = 0U;
+#endif
+
+	return ullTotal;
 }

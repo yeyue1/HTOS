@@ -342,4 +342,14 @@ void htTaskSwitchContext(void);
  */
 BaseType_t htprvCreateIdleTask(void);
 
+#if (configGENERATE_RUN_TIME_STATS == 1)
+/**
+ * @brief 取空闲任务的控制块。
+ *
+ * @return 空闲任务句柄；尚未创建时返回 NULL。
+ * @note 运行时间统计据此把空闲任务占用的周期数单独记账，好算出 CPU 使用率。
+ */
+TaskHandle_t htTaskGetIdleHandle(void);
+#endif
+
 #endif /* HTTASK_H */

@@ -61,40 +61,8 @@ UBaseType_t htGetTaskStackHighWaterMark(TaskHandle_t xTask)
 	return uxUntouchedWords;
 }
 
-/**
- * @brief 获取 CPU 使用率。
- *
- * @return 固定返回 0，单位为百分比。
- * @note 当前版本没有实现运行时统计计数器，这里返回 0，避免把“没有数据”
- *       误报成 100% 满载。
+/*
+ * 运行时间统计（htGetCPUUsage / htGetIdleRunTimePercent / htGetRunTimeCounter）
+ * 的实现在 kernel/httask.c：它必须跟着 SysTick 采样走，也要直接读当前任务的 TCB，
+ * 放在这里只会平白多一条跨文件依赖。本文件只保留与本模块无关的换算与栈分析。
  */
-uint32_t htGetCPUUsage(void)
-{
-	/* 未配置运行时计数器时返回 0，避免误报 100% 负载。 */
-	return 0U;
-}
-
-/**
- * @brief 获取空闲任务占用 CPU 时间的百分比。
- *
- * @return 固定返回 0，单位为百分比。
- * @note 占位实现：尚未启用 configGENERATE_RUN_TIME_STATS 一类的运行时统计，
- *       因此不产生有效数值。
- */
-uint32_t htGetIdleRunTimePercent(void)
-{
-	/* 简化实现 */
-	return 0;
-}
-
-/**
- * @brief 获取系统运行时间计数。
- *
- * @return 固定返回 0。
- * @note 占位实现，预留给将来基于高精度时基累计的运行时间统计；
- *       需要时间基准时请改用 xTickCount 或 htTicksToTime()。
- */
-uint64_t htGetRunTimeCounter(void)
-{
-	return 0;
-}
