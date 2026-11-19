@@ -44,6 +44,38 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 - `htEnterCritical()` **先关中断、再递增嵌套计数**。反序会留下一个可抢占窗口：计数已加、PRIMASK 仍为 0 时若被 SysTick 抢占，换出的上下文会多带一层嵌套，返回后 `htExitCritical()` 只能把计数减到 1，永远走不到恢复中断的分支，PRIMASK 永久置位而系统**静默死锁**（不触发任何 fault）。
 - 因此临界区必须短小，且不得在临界区内调用可能阻塞的 API。
 
+## 任务心跳监督
+
+内核提供一张**固定容量**的注册表，把“某个任务不再推进”变成可判定的信号，配合 MCU 自带的
+独立看门狗即可在任务失速时复位。内核只做内存操作，不碰任何看门狗寄存器——复位源留在板级。
+
+- `htWatchdogRegister(task)` / `htWatchdogUnregister(task)` 增删被监督任务，容量由
+  `configWATCHDOG_MAX_TASKS`（默认 8）给出，**不申请堆**；重复注册、容量耗尽、注销未注册
+  任务都返回 `htFAIL`。删除任务前必须先注销。
+- `htWatchdogHeartbeat()` 由任务在**有意义的进度点**调用，只认当前任务；未注册任务调用返回 `htFAIL`。
+- `htWatchdogCheck()` 由监控任务周期调用：首次调用只建立基线并返回 `htFALSE`，其后要求
+  **每个**注册任务的计数都前进才返回 `htTRUE`；漏报时不推进快照，因此持续漏报会一直不健康。
+  注册表为空也返回 `htFALSE`。
+- `htWatchdogReset()` 清空注册表，供初始化和测试使用。
+
+典型用法是一个高优先级任务当监工，**它自己不注册、也不给自己报心跳**——否则它可以用自己的
+执行替自己续命，监督便失去意义：
+
+```c
+static void MonitorTask(void *argument)
+{
+	(void)argument;
+	for (;;) {
+		if (htWatchdogCheck() == htTRUE) {
+			feed_watchdog();   /* 由使用方按目标 MCU 实现，如 HAL_IWDG_Refresh() */
+		}
+		htTaskDelay(pdMS_TO_TICKS(500U));
+	}
+}
+```
+
+> 注意：该机制只检查“任务还在推进”，不检查推进结果是否正确；也不覆盖中断服务程序卡死
+> （SysTick 停摆时心跳同样会停，因而仍会被复位）。
 ## 配置开关
 
 `include/htconfig.h` 中的宏并非全部生效。当前**已实现**：`configUSE_PREEMPTION`、
