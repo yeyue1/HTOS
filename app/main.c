@@ -70,6 +70,16 @@ static TaskHandle_t s_logger_task = NULL;
 static volatile uint32_t s_last_error = APP_ERR_NONE;
 
 /* -------------------------------------------------------------------------- */
+/* 静态存储：两个任务的栈与控制块都在编译期落地，运行期一个字节都不向堆申请    */
+/* -------------------------------------------------------------------------- */
+/* 栈深仍按字节配置，这里除以 sizeof(StackType_t) 换成 htTaskCreateStatic 要求的
+   word 数（Cortex-M3 上为 4）。放在 .bss 里，与原来的 12 KB TLSF 池互不重叠。 */
+static StackType_t s_blink_stack[APP_TASK_BLINK_STACK_BYTES / sizeof(StackType_t)];
+static htTCB_t s_blink_tcb;
+static StackType_t s_logger_stack[APP_TASK_LOG_STACK_BYTES / sizeof(StackType_t)];
+static htTCB_t s_logger_tcb;
+
+/* -------------------------------------------------------------------------- */
 /* 轻量格式化工具：不调 printf、不碰堆、输出长度有界                          */
 /* -------------------------------------------------------------------------- */
 /**
@@ -405,13 +415,17 @@ int main(void)
 		prv_fatal("htOSInit()", s_last_error);
 	}
 
-	s_blink_task = htOSTaskCreate("blink", prv_blink_task, NULL, APP_TASK_BLINK_STACK_BYTES, (uint8_t)HT_LOW_TASK);
+	s_blink_task =
+			htTaskCreateStatic(prv_blink_task, "blink", (uint16_t)(APP_TASK_BLINK_STACK_BYTES / sizeof(StackType_t)),
+					NULL, (UBaseType_t)HT_LOW_TASK, s_blink_stack, &s_blink_tcb);
 	if (s_blink_task == NULL) {
 		s_last_error = APP_ERR_TASK_BLINK;
 		prv_fatal("blink task", s_last_error);
 	}
 
-	s_logger_task = htOSTaskCreate("logger", prv_logger_task, NULL, APP_TASK_LOG_STACK_BYTES, (uint8_t)HT_NORMAL_TASK);
+	s_logger_task =
+			htTaskCreateStatic(prv_logger_task, "logger", (uint16_t)(APP_TASK_LOG_STACK_BYTES / sizeof(StackType_t)),
+					NULL, (UBaseType_t)HT_NORMAL_TASK, s_logger_stack, &s_logger_tcb);
 	if (s_logger_task == NULL) {
 		s_last_error = APP_ERR_TASK_LOGGER;
 		prv_fatal("logger task", s_last_error);
