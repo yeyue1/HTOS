@@ -57,7 +57,7 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 `configMINIMAL_STACK_SIZE`、`configUSE_TASK_NOTIFICATIONS`、
 `configUSE_RECURSIVE_MUTEXES`、`configSUPPORT_STATIC_ALLOCATION`、`configUSE_IDLE_HOOK`、
 `configCHECK_FOR_STACK_OVERFLOW`、`configUSE_TICK_HOOK`、`configUSE_MALLOC_FAILED_HOOK`、
-`configGENERATE_RUN_TIME_STATS`。
+`configGENERATE_RUN_TIME_STATS`、`configUSE_STATS_FORMATTING_FUNCTIONS`。
 
 两个钩子都是**弱符号**，不提供同名强符号也能编译通过，默认实现什么也不做：
 
@@ -67,8 +67,34 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
   纯静态配置（`configTOTAL_HEAP_SIZE` 为 0）下每次分配都必然失败，钩子同样会触发，
   正好暴露"以为有堆其实没有"的误用。
 
-**尚未实现**的开关会在编译期直接 `#error` 中止，而不是静默忽略：`configUSE_QUEUE_SETS`、
-`configUSE_STATS_FORMATTING_FUNCTIONS`。
+**尚未实现**的开关会在编译期直接 `#error` 中止，而不是静默忽略：`configUSE_QUEUE_SETS`。
+
+### 任务表 htTaskList()
+
+`configUSE_STATS_FORMATTING_FUNCTIONS` 为 1 时提供 `size_t htTaskList(char *pcWriteBuffer, size_t uxBufferSize)`，
+把全部任务的名称、状态、优先级、栈高水位与 CPU 占比拼成一张文本表：
+
+```c
+char line[200];
+size_t used = htTaskList(line, sizeof(line));
+board_console_write(line, (uint32_t)used);
+```
+
+实板抓包（三个任务）输出如下：
+
+```text
+name     s prio stk rt%
+blink    r 1 110 3%
+logger   r 2 175 0%
+```
+
+列含义：`s` 是状态字母（`R` 运行、`r` 就绪、`B` 阻塞、`S` 挂起、`?` 无效），`prio` 是
+当前优先级，`stk` 是栈高水位的**剩余字**数，`rt%` 是该任务占用的 CPU 百分比（自启动以来
+的平均值，需要 `configGENERATE_RUN_TIME_STATS` 为 1，否则恒为 0）。
+
+拼接过程不用 `printf`、不申请堆，缓冲区写满即截断，末尾永远保留 `'\0'`；遍历期间关闭中断，
+因此只适合调试输出，不要放在高频路径上。固件侧用 `-DHTOS_STATS_FORMATTING=ON` 打开
+（代价约 696 字节 Flash、RAM 零增量——表缓冲放在调用者栈上）；库默认关闭，关闭时整块代码被裁掉。
 
 ## 快速上手
 
