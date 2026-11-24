@@ -26,6 +26,7 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 - `htQueueSpacesAvailable()` 查询剩余容量。
 - `htQueueOverwrite()` 用于长度为 1 的数据队列，保留最新值，适合传感器快照和状态发布。
 - `htQueueCreateStatic()` 支持调用方提供队列控制块与数据区；二值/计数信号量和普通互斥令牌也可静态创建。
+- 队列集（`configUSE_QUEUE_SETS`）：把多个队列/信号量聚成一个集合，一次等待其中任意一个有数据，见下文“队列集”一节。
 - 二值信号量、计数信号量和有上限的二值互斥令牌。
 - 递归互斥量跟踪持有者和递归深度，并对发生阻塞的高优先级任务执行优先级继承。
 
@@ -53,12 +54,14 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 
 ## 配置开关
 
-`include/htconfig.h` 中的宏并非全部生效。当前**已实现**：`configUSE_PREEMPTION`、
+`include/htconfig.h` 中的宏现在都接入实现，没有“设了也不生效”的开关：`configUSE_PREEMPTION`、
 `configUSE_TIME_SLICING`、`configMAX_PRIORITIES`、`configTOTAL_HEAP_SIZE`、
 `configMINIMAL_STACK_SIZE`、`configUSE_TASK_NOTIFICATIONS`、
-`configUSE_RECURSIVE_MUTEXES`、`configSUPPORT_STATIC_ALLOCATION`、`configUSE_IDLE_HOOK`、
-`configCHECK_FOR_STACK_OVERFLOW`、`configUSE_TICK_HOOK`、`configUSE_MALLOC_FAILED_HOOK`、
-`configGENERATE_RUN_TIME_STATS`、`configUSE_STATS_FORMATTING_FUNCTIONS`。
+`configUSE_RECURSIVE_MUTEXES`、`configUSE_QUEUE_SETS`、`configSUPPORT_STATIC_ALLOCATION`、
+`configUSE_IDLE_HOOK`、`configCHECK_FOR_STACK_OVERFLOW`、`configUSE_TICK_HOOK`、
+`configUSE_MALLOC_FAILED_HOOK`、`configGENERATE_RUN_TIME_STATS`、
+`configUSE_STATS_FORMATTING_FUNCTIONS`。其中 `configTOTAL_HEAP_SIZE`、`configUSE_QUEUE_SETS`
+与 `configUSE_STATS_FORMATTING_FUNCTIONS` 允许在构建层用 `-D` 覆盖。
 
 两个钩子都是**弱符号**，不提供同名强符号也能编译通过，默认实现什么也不做：
 
@@ -68,7 +71,10 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
   纯静态配置（`configTOTAL_HEAP_SIZE` 为 0）下每次分配都必然失败，钩子同样会触发，
   正好暴露"以为有堆其实没有"的误用。
 
-**尚未实现**的开关会在编译期直接 `#error` 中止，而不是静默忽略：`configUSE_QUEUE_SETS`。
+仍保留一处编译期拦截，但只针对跨开关依赖：`configUSE_STATS_FORMATTING_FUNCTIONS` 为 1 而
+`configUSE_TRACE_FACILITY` 为 0 时直接 `#error` 中止，而不是静默失效。`configUSE_MUTEXES`、
+`configUSE_COUNTING_SEMAPHORES` 与 `configUSE_TRACE_FACILITY` 功能可用，但尚未用 `#if` 包裹，
+置 0 不会裁掉任何代码。
 
 ### 任务表 htTaskList()
 
@@ -96,6 +102,41 @@ logger   r 2 175 0%
 拼接过程不用 `printf`、不申请堆，缓冲区写满即截断，末尾永远保留 `'\0'`；遍历期间关闭中断，
 因此只适合调试输出，不要放在高频路径上。固件侧用 `-DHTOS_STATS_FORMATTING=ON` 打开
 （代价约 696 字节 Flash、RAM 零增量——表缓冲放在调用者栈上）；库默认关闭，关闭时整块代码被裁掉。
+
+### 队列集 htQueueSetCreate()
+
+`configUSE_QUEUE_SETS` 为 1（默认）时，可以把多个队列/信号量聚成一个集合，用一次调用等待
+“其中任意一个有数据”，不必逐个轮询：
+
+```c
+static uint8_t set_storage[4 * sizeof(QueueSetMemberHandle_t)];
+static uint8_t queue_storage[2 * sizeof(uint32_t)];
+static htQUEUE_t set_buffer;
+static htQUEUE_t queue_buffer;
+
+QueueSetHandle_t set = htQueueSetCreateStatic(4U, set_storage, &set_buffer);
+QueueHandle_t queue = htQueueCreateStatic(2U, sizeof(uint32_t), queue_storage, &queue_buffer);
+(void)htQueueAddToSet(queue, set);
+
+uint32_t value = 0;
+QueueSetMemberHandle_t member = htQueueSelectFromSet(set, htTimeToTicks(100U));
+if (member == queue) {
+	(void)htQueueReceive(queue, &value, 0U);   /* 数据仍在成员里，集合只报告“谁有” */
+}
+```
+
+语义（完整契约写在 `include/htqueue.h` 的接口注释里）：
+
+- 集合本身就是一个队列，元素是成员句柄；`htQueueSelectFromSet()` 只取句柄，**不搬数据**。
+- 成员每成功入队一项就往集合投一个令牌；从成员取数据不产生令牌。
+- 集合容量必须不小于各成员容量之和；满了就丢令牌（ISR 路径不能阻塞），容量不足表现为漏唤醒。
+- 成员加入集合前必须为空，否则其中的旧数据不产生令牌；已加入的成员不能再加入第二个集合。
+- 成员未从集合摘除前不允许删除，集合还有成员时也不允许删除（两者都静默拒绝，句柄继续有效）。
+- 二值/计数信号量也可以作为成员（它们本质上是队列）；`htQueueSelectFromSetFromISR()` 供 ISR 使用。
+
+关闭该开关时，相关 API 与每个队列上的三个集合字段（12 字节）一起消失。固件默认没有队列，
+因此默认开启不增加任何 RAM 与 Flash；实测使用时的代价是**约 1320 字节 Flash**，RAM 只取决于
+调用方自建的集合与成员对象，内核不额外分配。
 
 ## 任务心跳监督与硬件看门狗
 
@@ -330,7 +371,8 @@ HTOS/
 - `portable/Cortex-M/htPortContext.c` 已改为 GCC/Thumb 内联汇编，可直接由 `arm-none-eabi-gcc` 构建；CMSIS 核心头文件通过 `HT_PORT_CORE_HEADER` 覆盖，SRAM 栈地址检查默认关闭，启用时用 `HT_PORT_VALIDATE_STACK`、`HT_PORT_SRAM_START` 和 `HT_PORT_SRAM_END` 按链接脚本配置。
 - 普通互斥量仍是有上限的二值令牌，不跟踪持有者；递归互斥量已覆盖单锁的持有者、递归深度、超时与优先级继承，但多把互斥量嵌套持有时的优先级回退尚未建模。
 - 静态分配目前覆盖任务、通用队列、二值/计数信号量和普通互斥令牌；递归互斥量仍通过动态创建接口构造。
-- 软件定时器、事件组和看门狗服务尚未实现。软件定时器应在专用服务任务、命令队列和回调上下文约束明确后再加入。
+- 软件定时器与事件组尚未实现（任务心跳监督与硬件看门狗已在上一节实现）。软件定时器应在专用服务任务、
+  命令队列和回调上下文约束明确后再加入。
 - `configGENERATE_RUN_TIME_STATS` 为 1 时，`htGetCPUUsage()`、`htGetIdleRunTimePercent()` 和
   `htGetRunTimeCounter()` 返回实测值：时间基准是 Cortex-M3 的 `DWT->CYCCNT`（不占用定时器，
   72 MHz 下约 59.6 s 回绕一次），`htTaskTickInc()` 每毫秒把刚过去的一个 tick 记到当前任务头上，
