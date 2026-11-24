@@ -26,6 +26,7 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 - `htQueueSpacesAvailable()` 查询剩余容量。
 - `htQueueOverwrite()` 用于长度为 1 的数据队列，保留最新值，适合传感器快照和状态发布。
 - `htQueueCreateStatic()` 支持调用方提供队列控制块与数据区；二值/计数信号量和普通互斥令牌也可静态创建。
+- 队列集（`configUSE_QUEUE_SETS`）：把多个队列/信号量聚成一个集合，一次等待其中任意一个有数据。
 - 二值信号量、计数信号量和有上限的二值互斥令牌。
 - 递归互斥量跟踪持有者和递归深度，并对发生阻塞的高优先级任务执行优先级继承。
 
@@ -81,12 +82,34 @@ static void MonitorTask(void *argument)
 `include/htconfig.h` 中的宏并非全部生效。当前**已实现**：`configUSE_PREEMPTION`、
 `configUSE_TIME_SLICING`、`configMAX_PRIORITIES`、`configTOTAL_HEAP_SIZE`、
 `configMINIMAL_STACK_SIZE`、`configUSE_TASK_NOTIFICATIONS`、
-`configUSE_RECURSIVE_MUTEXES`、`configSUPPORT_STATIC_ALLOCATION`、`configUSE_IDLE_HOOK`、
-`configCHECK_FOR_STACK_OVERFLOW`。
+`configUSE_RECURSIVE_MUTEXES`、`configUSE_QUEUE_SETS`、`configSUPPORT_STATIC_ALLOCATION`、
+`configUSE_IDLE_HOOK`、`configCHECK_FOR_STACK_OVERFLOW`。
 
-**尚未实现**的开关会在编译期直接 `#error` 中止，而不是静默忽略：`configUSE_QUEUE_SETS`、
-`configGENERATE_RUN_TIME_STATS`、`configUSE_STATS_FORMATTING_FUNCTIONS`、
-`configUSE_TICK_HOOK`、`configUSE_MALLOC_FAILED_HOOK`。
+**尚未实现**的开关会在编译期直接 `#error` 中止，而不是静默忽略：
+`configGENERATE_RUN_TIME_STATS`、`configUSE_STATS_FORMATTING_FUNCTIONS`、`configUSE_TICK_HOOK`、
+`configUSE_MALLOC_FAILED_HOOK`。
+
+### 队列集
+
+`configUSE_QUEUE_SETS` 为 1（默认）时，可以把多个队列/信号量聚成一个集合，用一次调用等待
+“其中任意一个有数据”，不必逐个轮询：
+
+```c
+QueueSetHandle_t set = htQueueSetCreate(4U);
+(void)htQueueAddToSet(queue_a, set);
+(void)htQueueAddToSet(queue_b, set);
+
+QueueSetMemberHandle_t member = htQueueSelectFromSet(set, htTimeToTicks(100U));
+if (member == queue_a) {
+	(void)htQueueReceive(queue_a, &value, 0U);   /* 集合只报告谁有数据，数据仍在成员里 */
+}
+```
+
+- 成员每成功入队一项就往集合投一个令牌；从成员取数据不产生令牌。
+- 集合容量必须不小于各成员容量之和；满了就丢令牌（ISR 路径不能阻塞），容量不足表现为漏唤醒。
+- 成员加入集合前必须为空；已加入的成员不能再加入第二个集合，集合也不能作为成员。
+- 成员未摘除前、集合还有成员时都不允许删除（静默拒绝，句柄继续有效）。
+- `htQueueSetCreateStatic()` 供纯静态配置使用，代价与普通队列相同。
 
 ## 快速上手
 
@@ -269,7 +292,8 @@ HTOS/
 - `portable/Cortex-M/htPortContext.c` 已改为 GCC/Thumb 内联汇编，可直接由 `arm-none-eabi-gcc` 构建；CMSIS 核心头文件通过 `HT_PORT_CORE_HEADER` 覆盖，SRAM 栈地址检查默认关闭，启用时用 `HT_PORT_VALIDATE_STACK`、`HT_PORT_SRAM_START` 和 `HT_PORT_SRAM_END` 按链接脚本配置。
 - 普通互斥量仍是有上限的二值令牌，不跟踪持有者；递归互斥量已覆盖单锁的持有者、递归深度、超时与优先级继承，但多把互斥量嵌套持有时的优先级回退尚未建模。
 - 静态分配目前覆盖任务、通用队列、二值/计数信号量和普通互斥令牌；递归互斥量仍通过动态创建接口构造。
-- 软件定时器、事件组和看门狗服务尚未实现。软件定时器应在专用服务任务、命令队列和回调上下文约束明确后再加入。
+- 软件定时器与事件组尚未实现；任务心跳监督已在内核侧提供（见上文），硬件看门狗刷新需使用方实现。
+  软件定时器应在专用服务任务、命令队列和回调上下文约束明确后再加入。
 - `htGetCPUUsage()`、`htGetIdleRunTimePercent()` 和 `htGetRunTimeCounter()` 暂未接入硬件运行时计数器。
 - 栈高水位是涂色扫描的历史估计；`configCHECK_FOR_STACK_OVERFLOW` 只能发现写穿栈边界的溢出（只比较栈底 4 个字），栈内的越界写仍需调试器或静态分析；STM32F103 无 MPU/PSPLIM，不能用硬件做栈与内存隔离。
 - 已在 STM32F103C8T6（Cortex-M3，72 MHz，64 KB Flash / 20 KB SRAM）实板上完成三轮压测：
