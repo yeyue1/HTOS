@@ -30,6 +30,7 @@ TEST_SPECS = {
             "../kernel/httask.c",
             "../kernel/htlist.c",
             "../kernel/htutils.c",
+            "../kernel/htschedpolicy.c",
             "stubs/host_cmsis.c",
         ],
         "extra_flags": [
@@ -45,6 +46,20 @@ TEST_SPECS = {
     },
     "test_watchdog.out": {
         "sources": ["test_watchdog.c", "unity.c", "../kernel/htwatchdog.c"],
+    },
+    "test_schedpolicy.out": {
+        "sources": [
+            "test_schedpolicy.c",
+            "unity.c",
+            "../kernel/htschedpolicy.c",
+            "../kernel/htschedfair.c",
+            "../kernel/htschededf.c",
+            "../kernel/htlist.c",
+        ],
+        "extra_flags": [
+            "-DconfigUSE_SCHED_POLICY_FAIR_SHARE=1",
+            "-DconfigUSE_SCHED_POLICY_EDF=1",
+        ],
     },
 }
 

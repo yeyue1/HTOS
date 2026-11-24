@@ -11,6 +11,7 @@
 #include "htmem.h"
 #include "htlist.h"
 #include "htscheduler.h"
+#include "htschedpolicy.h"
 #include "httrace.h"
 #include "htutils.h"
 #include <string.h>
@@ -194,6 +195,9 @@ static BaseType_t prvInitialiseNewTask(TaskFunction_t pxTaskCode, const char *pc
 	pxNewTCB->uxTaskState = HT_TASK_READY;
 	htListInsertEnd(&(pxReadyTasksLists[uxPriority]), &(pxNewTCB->xStateListItem));
 	uxCurrentNumberOfTasks++;
+
+	/* 通知当前策略：新任务已经进入就绪表，策略可以初始化自己的私有字段。 */
+	htSchedNotifyTaskCreated(pxNewTCB);
 	if (pxCurrentTCB == NULL) {
 		pxCurrentTCB = pxNewTCB;
 	}
@@ -1215,6 +1219,9 @@ void htTaskTickInc(void)
 #if (configGENERATE_RUN_TIME_STATS == 1)
 	htRunTimeSample();
 #endif
+
+	/* 让当前策略给刚过去的这个 tick 记账：公平策略累加虚拟时间，最早死期策略查漏期。 */
+	htSchedNotifyTick(pxCurrentTCB);
 
 	/* 把所有到期任务搬回就绪链表。 */
 	htTaskCheckDelayedTasks();
