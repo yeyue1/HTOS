@@ -13,6 +13,7 @@
 #include "stm32f1xx_hal.h"
 #include "httrace.h"
 #include "htschedpolicy.h"
+#include "htlatency.h"
 #include <stddef.h> /* 提供 NULL 定义 */
 #include "core_cm3.h" /* 提供 NVIC 与 SCB 定义 */
 
@@ -207,6 +208,12 @@ void htEnterCritical(void)
 	 */
 	__asm volatile("cpsid i");
 	uxCriticalNesting++;
+
+	/*
+	 * 打点放在计数之后：仪表只统计最外层（nesting == 1）的那一段，而判断
+	 * "是不是最外层"必须等计数加完才能确定。此处中断已经关闭，不受采样影响。
+	 */
+	HT_LATENCY_CRITICAL_ENTER();
 }
 
 /**
@@ -218,6 +225,12 @@ void htExitCritical(void)
 {
 	/* 防御：计数为 0 时直接返回，避免无符号下溢后永久关中断。 */
 	if (uxCriticalNesting > 0) {
+		/*
+		 * 结算必须在递减之前：仪表靠 "nesting == 1" 认定最外层出口，
+		 * 也要赶在 cpsie i 之前算完，否则被中断插进来的时间会被算进临界区。
+		 */
+		HT_LATENCY_CRITICAL_EXIT();
+
 		uxCriticalNesting--;
 
 		/* 只有最外层退出才执行 cpsie i。 */

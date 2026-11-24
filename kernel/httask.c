@@ -12,6 +12,7 @@
 #include "htlist.h"
 #include "htscheduler.h"
 #include "htschedpolicy.h"
+#include "htlatency.h"
 #include "httrace.h"
 #include "htutils.h"
 #include <string.h>
@@ -1194,6 +1195,9 @@ void htTaskTickInc(void)
 	/* 整段处理在关中断下完成，保证 tick 递增与延时时序一致。 */
 	__disable_irq();
 
+	/* 计量本次滴答中断本身的开销：起点含上面这条关中断，止点在开中断之前。 */
+	HT_LATENCY_TICK_BEGIN();
+
 	/* 递增系统滴答计数。 */
 	xTickCount++;
 	if (xTickCount == 0U) {
@@ -1233,6 +1237,9 @@ void htTaskTickInc(void)
 			SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
 		}
 	}
+	/* 结算本次滴答中断的耗时，然后重新开中断。 */
+	HT_LATENCY_TICK_END();
+
 	/* 重新开中断。 */
 	__enable_irq();
 }

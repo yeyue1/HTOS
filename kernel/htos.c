@@ -16,6 +16,7 @@
 #include "htqueue.h"
 #include "htsemaphore.h"
 #include "htutils.h"
+#include "htlatency.h"
 #include "httrace.h"
 #include "stm32f1xx.h"
 
@@ -91,6 +92,14 @@ int htOSInit(void)
 	if (gOSInitialized) {
 		return 0; /* 已经初始化，直接返回。 */
 	}
+
+#if (configUSE_LATENCY_STATS == 1)
+	/*
+	 * 尽早接管 DWT：放在 htSchedulerInit() 之前，这样初始化期间自身的临界区
+	 * 也会被采样。关闭该开关时这一整块（含 htLatencyInit 的定义）都不存在。
+	 */
+	htLatencyInit();
+#endif
 
 	/* 清零滴答计数器，保证运行时间从 0 开始累计。 */
 	xTickCount = 0;

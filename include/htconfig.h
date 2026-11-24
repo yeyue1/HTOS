@@ -15,6 +15,16 @@
 /** 系统滴答频率，单位 Hz；htTimeToTicks()/htTicksToTime() 依赖它换算毫秒与滴答。 */
 #define configTICK_RATE_HZ 1000
 
+/**
+ * CPU 主频，单位 Hz，用于把 DWT 周期数换算成时间。
+ *
+ * 本仓库固件按 72 MHz 运行；这个值只参与"周期 -> 微秒"的除法（72 MHz 时正好 72 个
+ * 周期一微秒），不影响任何调度行为。用 #ifndef 包裹，换主频的板子可以用 -D 覆盖。
+ */
+#ifndef configCPU_CLOCK_HZ
+#define configCPU_CLOCK_HZ 72000000UL
+#endif
+
 /** 最大任务优先级个数；合法优先级为 0 ~ configMAX_PRIORITIES-1，数值越大优先级越高。 */
 #define configMAX_PRIORITIES 32
 
@@ -86,6 +96,19 @@
 
 /** @brief 读取 DWT 周期计数器的当前值；72 MHz 下约 59.6 s 回绕一次。 */
 #define portGET_RUN_TIME_COUNTER_VALUE() (DWT->CYCCNT)
+#endif
+
+/**
+ * 1 = 编入实时性仪表（见 htlatency.h）：在 htEnterCritical()/htExitCritical() 与
+ * htTaskTickInc() 里用 DWT 周期计数器打点，记录最坏情况临界区与滴答中断耗时、
+ * 峰值出现时的调用点、采样次数，以及一张按 1/2/4/8/16/32/64 us 分档的直方图。
+ *
+ * 关中断的最长一段直接决定中断响应延迟，是硬实时抖动的主要来源，而这个上界无法
+ * 靠静态分析得到，只能实测。置 0（默认）时四个打点宏展开为空，内核不付任何代价；
+ * 置 1 时约 80 字节 RAM，Flash 只增加打点与统计代码本身。
+ */
+#ifndef configUSE_LATENCY_STATS
+#define configUSE_LATENCY_STATS 0
 #endif
 
 /**
