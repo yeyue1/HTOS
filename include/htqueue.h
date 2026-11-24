@@ -69,6 +69,19 @@ typedef struct htQueueDefinition {
 	volatile int8_t cTxLock; /**< 发送方向的队列锁，与 cRxLock 配合批量唤醒 */
 	uint8_t ucStaticallyAllocated; /**< 非 0 表示控制块与存储区由调用方提供，删除时不释放 */
 
+#if (configUSE_QUEUE_SETS == 1)
+	/**
+	 * 队列集相关字段，仅在 configUSE_QUEUE_SETS 为 1 时存在。
+	 * - pxQueueSetContainer 非空表示本队列是某个集合的成员，每次成功入队都会把自身句柄
+	 *   转发进集合；
+	 * - uxQueueSetMembers / ucIsQueueSet 只在集合本身（htQueueSetCreate() 创建的队列）
+	 *   上有意义，用于拒绝"删掉还有成员的集合"和"把集合再塞进另一个集合"。
+	 */
+	struct htQueueDefinition *pxQueueSetContainer;
+	UBaseType_t uxQueueSetMembers;
+	uint8_t ucIsQueueSet;
+#endif
+
 } htQUEUE_t;
 
 /** @brief 队列句柄。 */
@@ -117,6 +130,93 @@ QueueHandle_t htQueueCreateStatic(
  *       删除前必须保证没有任务还挂在它的等待链表上。
  */
 void htQueueDelete(QueueHandle_t xQueue);
+
+/* ------------------------------------------------------------------ */
+/* 队列集（configUSE_QUEUE_SETS == 1 时可用）                           */
+/* ------------------------------------------------------------------ */
+
+#if (configUSE_QUEUE_SETS == 1)
+
+/** @brief 队列集句柄：集合本身也是一个队列，元素是成员句柄。 */
+typedef htQUEUE_t *QueueSetHandle_t;
+
+/** @brief 队列集成员句柄：加入集合的队列或信号量。 */
+typedef htQUEUE_t *QueueSetMemberHandle_t;
+
+/**
+ * @brief 创建一个队列集。
+ *
+ * @param[in] uxEventQueueLength 集合容量，必须不小于所有成员队列长度之和。
+ * @return 成功返回集合句柄，容量为 0 或内存不足返回 NULL。
+ *
+ * @note 集合内部就是一个元素类型为 QueueSetMemberHandle_t 的普通队列：成员每次成功
+ *       入队就往集合里投一个"我有数据"的令牌。取值只能靠 htQueueSelectFromSet()，
+ *       直接把集合当队列接收会破坏令牌与成员数据的对应关系。
+ */
+QueueSetHandle_t htQueueSetCreate(UBaseType_t uxEventQueueLength);
+
+/**
+ * @brief 用调用方提供的存储区静态创建一个队列集（不申请堆）。
+ *
+ * @param[in] uxEventQueueLength 集合容量，应不小于所有成员队列长度之和。
+ * @param[in] pucQueueStorage 令牌区，长度至少为 uxEventQueueLength * sizeof(QueueSetMemberHandle_t)。
+ * @param[in] pxQueueSetBuffer 调用方提供的控制块。
+ * @return 成功返回集合句柄；容量为 0 或参数为空返回 NULL。
+ *
+ * @note 与 htQueueCreateStatic() 对称，供 configTOTAL_HEAP_SIZE == 0 的纯静态固件使用；
+ *       删除时不会释放这块内存。
+ */
+QueueSetHandle_t htQueueSetCreateStatic(
+		UBaseType_t uxEventQueueLength, uint8_t *pucQueueStorage, htQUEUE_t *pxQueueSetBuffer);
+
+/**
+ * @brief 把一个队列或信号量加入集合。
+ *
+ * @param[in] xQueueOrSemaphore 待加入的成员，必须非空、非集合、尚未加入任何集合、且当前为空。
+ * @param[in] xQueueSet 目标集合。
+ * @return 加入成功返回 htPASS，参数非法或成员已属于某个集合返回 htFAIL。
+ *
+ * @note 成员必须为空，否则"加入前就有的数据"不会产生令牌，集合会漏报。
+ * @warning 加入后删除成员前必须先 htQueueRemoveFromSet()，否则 htQueueDelete() 会拒绝。
+ */
+BaseType_t htQueueAddToSet(QueueSetMemberHandle_t xQueueOrSemaphore, QueueSetHandle_t xQueueSet);
+
+/**
+ * @brief 把成员从集合中摘出。
+ *
+ * @param[in] xQueueOrSemaphore 待摘除的成员。
+ * @param[in] xQueueSet 它所属的集合。
+ * @return 摘除成功返回 htPASS；参数非法或该成员不在此集合中返回 htFAIL。
+ *
+ * @note 摘除不会清掉集合里已经积累的令牌，那些令牌仍可能让 htQueueSelectFromSet()
+ *       返回这个已摘除的成员。调用方应在摘除后自行 htQueueSelectFromSet() 把残留令牌
+ *       抽干，或直接删除集合。
+ */
+BaseType_t htQueueRemoveFromSet(QueueSetMemberHandle_t xQueueOrSemaphore, QueueSetHandle_t xQueueSet);
+
+/**
+ * @brief 等待集合中任意一个成员有数据。
+ *
+ * @param[in] xQueueSet 集合句柄。
+ * @param[in] xTicksToWait 一个成员都没有数据时的最长等待 tick 数；htBLOCKED_INDEFINITELY 表示永久等待。
+ * @return 有数据的成员句柄；超时或参数非法返回 NULL。
+ *
+ * @note 返回的是"哪个成员有数据"，数据本身仍留在成员队列里，需要再对该成员调用
+ *       htQueueReceive()/htSemaphoreTake() 取走。
+ */
+QueueSetMemberHandle_t htQueueSelectFromSet(QueueSetHandle_t xQueueSet, TickType_t xTicksToWait);
+
+/**
+ * @brief 中断上下文里取一个"有数据"的成员，不阻塞。
+ *
+ * @param[in] xQueueSet 集合句柄。
+ * @return 有数据的成员句柄；集合为空或参数非法返回 NULL。
+ * @note 不返回"是否唤醒了更高优先级任务"：集合只在成员入队时被填充，接收方在中断里
+ *       取令牌不会唤醒任何发送者。
+ */
+QueueSetMemberHandle_t htQueueSelectFromSetFromISR(QueueSetHandle_t xQueueSet);
+
+#endif /* configUSE_QUEUE_SETS */
 
 /* ------------------------------------------------------------------ */
 /* 队列发送                                                             */

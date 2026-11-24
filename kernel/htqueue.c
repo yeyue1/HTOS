@@ -264,6 +264,37 @@ static htTCB_t *prvUnblockFirstTask(htList_t *pxEventList)
 	return pxTCB;
 }
 
+#if (configUSE_QUEUE_SETS == 1)
+/**
+ * @brief 成员入队成功后，把"我有数据"的令牌投进它所属的队列集。
+ *
+ * @param[in,out] pxQueue 刚刚成功入队的成员队列。
+ *
+ * @return 若本次投递唤醒了阻塞在集合上的任务，返回该任务的控制块；否则返回 NULL。
+ *
+ * @warning 必须在持有内核临界区时调用，本函数自己不再关中断。
+ * @note 集合已满时令牌被丢弃而不是阻塞：发送方在中断里也可能走到这里，不能阻塞。
+ *       这也是"集合容量必须不小于成员长度之和"这条使用约束的由来——容量足够时
+ *       永远不会丢令牌，容量不足时 htQueueSelectFromSet() 可能漏掉已有的数据。
+ * @note 令牌只在成员成功入队时产生，因此"取走成员数据"不会产生令牌；集合回答的是
+ *       "哪个成员曾经有数据"，取数据仍要自己对该成员调用 htQueueReceive()。
+ */
+static htTCB_t *prvQueueSetNotify(htQUEUE_t *pxQueue)
+{
+	htQUEUE_t *pxSet = pxQueue->pxQueueSetContainer;
+	htTCB_t *pxUnblocked = NULL;
+
+	/* 不是成员、或恰好是集合自己（集合不会再进别的集合）都直接跳过。 */
+	if (pxSet != NULL && pxSet != pxQueue && pxSet->uxMessagesWaiting < pxSet->uxLength) {
+		QueueSetMemberHandle_t xMember = pxQueue;
+		prvCopyDataToQueue(pxSet, &xMember);
+		pxUnblocked = prvUnblockFirstTask(&(pxSet->xTasksWaitingToReceive));
+	}
+
+	return pxUnblocked;
+}
+#endif /* configUSE_QUEUE_SETS */
+
 /**
  * @brief 向队列发送一条消息；队列满时可限时阻塞等待。
  *
@@ -292,6 +323,10 @@ BaseType_t htQueueSend(QueueHandle_t xQueue, const void *pvItemToQueue, TickType
 		/* 队列未满：拷入消息，再从等待接收链表中唤醒一个任务。 */
 		if (pxQueue->uxMessagesWaiting < pxQueue->uxLength) {
 			prvCopyDataToQueue(pxQueue, pvItemToQueue);
+#if (configUSE_QUEUE_SETS == 1)
+			/* 成员入队后先给集合投令牌，再唤醒本队列的接收者。 */
+			(void)prvQueueSetNotify(pxQueue);
+#endif
 			(void)prvUnblockFirstTask(&(pxQueue->xTasksWaitingToReceive));
 			htExitCritical();
 			return htPASS;
@@ -397,8 +432,20 @@ BaseType_t htQueueSendFromISR(QueueHandle_t xQueue, const void *pvItemToQueue, B
 		/* 拷贝消息，并尝试唤醒一个等待接收的任务。 */
 		prvCopyDataToQueue(pxQueue, pvItemToQueue);
 
-		/* 只有被唤醒任务的优先级高于当前任务时，才要求中断退出后切换。 */
+#if (configUSE_QUEUE_SETS == 1)
+		/* 成员入队也会唤醒阻塞在集合上的任务，两者取优先级更高的那个。 */
+		htTCB_t *pxSetUnblocked = prvQueueSetNotify(pxQueue);
+#endif
 		htTCB_t *pxUnblockedTCB = prvUnblockFirstTask(&(pxQueue->xTasksWaitingToReceive));
+
+#if (configUSE_QUEUE_SETS == 1)
+		if (pxSetUnblocked != NULL &&
+				(pxUnblockedTCB == NULL || pxSetUnblocked->uxPriority > pxUnblockedTCB->uxPriority)) {
+			pxUnblockedTCB = pxSetUnblocked;
+		}
+#endif
+
+		/* 只有被唤醒任务的优先级高于当前任务时，才要求中断退出后切换。 */
 		if (pxUnblockedTCB != NULL && (pxCurrentTCB == NULL || pxUnblockedTCB->uxPriority > pxCurrentTCB->uxPriority) &&
 				pxHigherPriorityTaskWoken != NULL) {
 			*pxHigherPriorityTaskWoken = htTRUE;
@@ -573,6 +620,8 @@ BaseType_t htQueueReset(QueueHandle_t xQueue)
  * @param[in] xQueue 队列句柄，可为 NULL。
  *
  * @note 静态创建的队列只清字段、不释放内存，避免去释放用户自己的缓冲。
+ * @note 参与队列集的句柄不会被真正删除：成员必须先 htQueueRemoveFromSet()，
+ *       集合必须先摘空所有成员，否则调用被静默忽略（句柄仍然有效）。
  * @warning 删除后句柄立即失效，调用者不得再使用。
  */
 void htQueueDelete(QueueHandle_t xQueue)
@@ -580,6 +629,18 @@ void htQueueDelete(QueueHandle_t xQueue)
 	htQUEUE_t *pxQueue = (htQUEUE_t *)xQueue;
 
 	if (pxQueue != NULL) {
+#if (configUSE_QUEUE_SETS == 1)
+		htEnterCritical();
+		/* 还是集合的成员，或集合里还有成员时拒绝删除：前者会让集合留下悬空句柄，
+		 * 后者会让集合永远等不到这些成员的数据。检查与释放之间不允许插入其它操作。 */
+		if ((pxQueue->pxQueueSetContainer != NULL) ||
+				((pxQueue->ucIsQueueSet != 0U) && (pxQueue->uxQueueSetMembers > 0U))) {
+			htExitCritical();
+			return;
+		}
+		htExitCritical();
+#endif
+
 		if (pxQueue->ucStaticallyAllocated != 0U) {
 			pxQueue->pcHead = NULL;
 			pxQueue->pcWriteTo = NULL;
@@ -650,3 +711,187 @@ BaseType_t htQueuePeek(QueueHandle_t xQueue, void *pvBuffer, TickType_t xTicksTo
 		}
 	}
 }
+
+#if (configUSE_QUEUE_SETS == 1)
+/**
+ * @brief 创建一个队列集。
+ *
+ * @param[in] uxEventQueueLength 集合容量，应不小于所有成员队列长度之和。
+ *
+ * @return 成功返回集合句柄；容量为 0 或创建时内存不足返回 NULL。
+ *
+ * @note 集合内部就是一个元素类型为 QueueSetMemberHandle_t 的普通队列：成员每次成功
+ *       入队都会往这里投一个令牌。容量不足时令牌会被丢弃（发送方可能在中断里，不能
+ *       阻塞），因此才会有上面那条容量约束。
+ */
+QueueSetHandle_t htQueueSetCreate(UBaseType_t uxEventQueueLength)
+{
+	htQUEUE_t *pxSet;
+
+	if (uxEventQueueLength < 1U) {
+		return NULL;
+	}
+
+	pxSet = (htQUEUE_t *)htQueueCreate(uxEventQueueLength, sizeof(QueueSetMemberHandle_t));
+	if (pxSet == NULL) {
+		return NULL;
+	}
+
+	/* 打上标记，后续用它拒绝"把集合当成员加入另一个集合"以及校验 select 的入参。 */
+	pxSet->ucIsQueueSet = 1U;
+	pxSet->uxQueueSetMembers = 0U;
+	pxSet->pxQueueSetContainer = NULL;
+	return pxSet;
+}
+
+/**
+ * @brief 用调用方提供的存储区静态创建一个队列集（不申请堆）。
+ *
+ * @param[in] uxEventQueueLength 集合容量，应不小于所有成员队列长度之和。
+ * @param[in] pucQueueStorage 令牌区，长度至少为 uxEventQueueLength * sizeof(QueueSetMemberHandle_t)。
+ * @param[in] pxQueueSetBuffer 调用方提供的控制块。
+ *
+ * @return 成功返回集合句柄；容量为 0 或参数为空返回 NULL。
+ *
+ * @note 与 htQueueCreateStatic() 对称，供 configTOTAL_HEAP_SIZE == 0 的纯静态固件使用；
+ *       删除时不会释放这块内存。
+ */
+QueueSetHandle_t htQueueSetCreateStatic(
+		UBaseType_t uxEventQueueLength, uint8_t *pucQueueStorage, htQUEUE_t *pxQueueSetBuffer)
+{
+	htQUEUE_t *pxSet;
+
+	if (uxEventQueueLength < 1U) {
+		return NULL;
+	}
+
+	pxSet = (htQUEUE_t *)htQueueCreateStatic(
+			uxEventQueueLength, sizeof(QueueSetMemberHandle_t), pucQueueStorage, pxQueueSetBuffer);
+	if (pxSet == NULL) {
+		return NULL;
+	}
+
+	pxSet->ucIsQueueSet = 1U;
+	pxSet->uxQueueSetMembers = 0U;
+	pxSet->pxQueueSetContainer = NULL;
+	return pxSet;
+}
+
+/**
+ * @brief 把一个队列或信号量加入集合。
+ *
+ * @param[in] xQueueOrSemaphore 待加入的成员。
+ * @param[in] xQueueSet 目标集合。
+ *
+ * @return 加入成功返回 htPASS；参数非法、成员是集合、已属某个集合或当前非空返回 htFAIL。
+ *
+ * @note 要求成员为空：加入前就存在的数据不会产生令牌，集合会漏报，因此宁可拒绝。
+ * @warning 加入后必须先 htQueueRemoveFromSet() 才能 htQueueDelete() 该成员。
+ */
+BaseType_t htQueueAddToSet(QueueSetMemberHandle_t xQueueOrSemaphore, QueueSetHandle_t xQueueSet)
+{
+	htQUEUE_t *pxMember = (htQUEUE_t *)xQueueOrSemaphore;
+	htQUEUE_t *pxSet = (htQUEUE_t *)xQueueSet;
+	BaseType_t xReturn = htFAIL;
+
+	if ((pxMember == NULL) || (pxSet == NULL) || (pxMember == pxSet)) {
+		return htFAIL;
+	}
+
+	htEnterCritical();
+	if ((pxSet->ucIsQueueSet != 0U) && (pxMember->ucIsQueueSet == 0U) && (pxMember->pxQueueSetContainer == NULL) &&
+			(pxMember->uxMessagesWaiting == 0U)) {
+		pxMember->pxQueueSetContainer = pxSet;
+		pxSet->uxQueueSetMembers++;
+		xReturn = htPASS;
+	}
+	htExitCritical();
+
+	return xReturn;
+}
+
+/**
+ * @brief 把成员从集合中摘出。
+ *
+ * @param[in] xQueueOrSemaphore 待摘除的成员。
+ * @param[in] xQueueSet 它所属的集合。
+ *
+ * @return 摘除成功返回 htPASS；参数非法或该成员不在此集合返回 htFAIL。
+ *
+ * @note 摘除不影响集合里已经积累的令牌：那些令牌仍可能让 select 返回这个成员，
+ *       调用方应把残留令牌抽干，或连同集合一起丢弃。
+ */
+BaseType_t htQueueRemoveFromSet(QueueSetMemberHandle_t xQueueOrSemaphore, QueueSetHandle_t xQueueSet)
+{
+	htQUEUE_t *pxMember = (htQUEUE_t *)xQueueOrSemaphore;
+	htQUEUE_t *pxSet = (htQUEUE_t *)xQueueSet;
+	BaseType_t xReturn = htFAIL;
+
+	if ((pxMember == NULL) || (pxSet == NULL)) {
+		return htFAIL;
+	}
+
+	htEnterCritical();
+	if (pxMember->pxQueueSetContainer == pxSet) {
+		pxMember->pxQueueSetContainer = NULL;
+		if (pxSet->uxQueueSetMembers > 0U) {
+			pxSet->uxQueueSetMembers--;
+		}
+		xReturn = htPASS;
+	}
+	htExitCritical();
+
+	return xReturn;
+}
+
+/**
+ * @brief 等待集合中任意一个成员有数据。
+ *
+ * @param[in] xQueueSet 集合句柄。
+ * @param[in] xTicksToWait 没有成员有数据时的最长等待 tick 数；htBLOCKED_INDEFINITELY 永久等待。
+ *
+ * @return 有数据的成员句柄；超时、参数非法或句柄不是集合时返回 NULL。
+ *
+ * @note 只回答"谁有数据"，数据仍在成员里，需要再对该成员调用 htQueueReceive()。
+ */
+QueueSetMemberHandle_t htQueueSelectFromSet(QueueSetHandle_t xQueueSet, TickType_t xTicksToWait)
+{
+	htQUEUE_t *pxSet = (htQUEUE_t *)xQueueSet;
+	QueueSetMemberHandle_t xMember = NULL;
+
+	if ((pxSet == NULL) || (pxSet->ucIsQueueSet == 0U)) {
+		return NULL;
+	}
+
+	if (htQueueReceive(pxSet, &xMember, xTicksToWait) != htPASS) {
+		return NULL;
+	}
+
+	return xMember;
+}
+
+/**
+ * @brief 在中断上下文里取一个"有数据"的成员，不阻塞。
+ *
+ * @param[in] xQueueSet 集合句柄。
+ *
+ * @return 有数据的成员句柄；集合为空、参数非法或句柄不是集合时返回 NULL。
+ *
+ * @note 等不到成员就返回 NULL，因此中断里应把它当作"这次有没有事件"的一次轮询。
+ */
+QueueSetMemberHandle_t htQueueSelectFromSetFromISR(QueueSetHandle_t xQueueSet)
+{
+	htQUEUE_t *pxSet = (htQUEUE_t *)xQueueSet;
+	QueueSetMemberHandle_t xMember = NULL;
+
+	if ((pxSet == NULL) || (pxSet->ucIsQueueSet == 0U)) {
+		return NULL;
+	}
+
+	if (htQueueReceiveFromISR(pxSet, &xMember, NULL) != htPASS) {
+		return NULL;
+	}
+
+	return xMember;
+}
+#endif /* configUSE_QUEUE_SETS */

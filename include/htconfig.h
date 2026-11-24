@@ -136,8 +136,17 @@
 /** 1 = 提供计数信号量接口（htSemaphoreCreateCounting 系列）。 */
 #define configUSE_COUNTING_SEMAPHORES 1
 
-/** 队列集开关；队列集尚未实现，只允许 0，置 1 会在下方触发 #error。 */
-#define configUSE_QUEUE_SETS 0
+/**
+ * 1 = 编入队列集（htQueueSetCreate 系列）：把多个队列/信号量聚成一个集合，
+ * 用一次 htQueueSelectFromSet() 等待其中任意一个有数据，而不是逐个轮询。
+ * 置 0 时相关 API 与每个队列上的集合字段一起被裁掉。
+ *
+ * 本项通过 #ifndef 允许构建层覆盖：置 1 时每个队列固定多占 12 字节（一个集合指针、
+ * 一个成员计数、一个标志位），本仓库固件里没有队列，因此默认开启不增加任何 RAM。
+ */
+#ifndef configUSE_QUEUE_SETS
+#define configUSE_QUEUE_SETS 1
+#endif
 
 /** 1 = 编入任务通知 API（htTaskNotify* 系列）。 */
 #define configUSE_TASK_NOTIFICATIONS 1
@@ -153,17 +162,11 @@
 #define configDEBUG_IDLE_STATS 0
 
 /**
- * @brief 配置审计：把"设了也没有实现"的开关变成编译期错误。
+ * @brief 配置审计：把"设了也不生效"的配置组合变成编译期错误。
  *
- * 下面这个开关目前还没有任何 #if 引用它：无论设成 0 还是 1，生成的固件都完全一样。
- * 配置项静默失效比缺少该功能更难排查——使用者会以为自己已经关掉了某项功能去省 Flash，
- * 或者以为打开了某个钩子。这里让它们在编译期直接失败，把"没有实现"变成一条明确的编译错误。
- *
- * 实现其中某项后，把对应的 #if 删掉即可。
+ * 原先这里还拦着"设了也没有实现"的开关（以 configUSE_QUEUE_SETS 收尾）；该功能补齐后，
+ * 本仓库的每个开关都至少控制一处 #if，这类拦截已无对象，只保留跨开关的依赖检查。
  */
-#if (configUSE_QUEUE_SETS != 0)
-#error "configUSE_QUEUE_SETS: queue sets are not implemented"
-#endif
 
 /* 格式化函数要遍历全局任务表，因此依赖 configUSE_TRACE_FACILITY。 */
 #if (configUSE_STATS_FORMATTING_FUNCTIONS == 1) && (configUSE_TRACE_FACILITY == 0)
