@@ -26,7 +26,10 @@ extern TickType_t xTickCount;
 static volatile uint32_t s_ulDeadlineMisses = 0U;
 
 /**
- * @brief 把任务恢复为"没有死期"的状态。
+ * @brief 新任务刚创建时的初始化：还没有登记死期。
+ *
+ * @note 新建任务的 TCB 在 prvInitialiseNewTask() 里已经整块清零，这里显式赋值是为了
+ *       让"新任务 = 无死期"这条契约写在策略里，而不是依赖 TCB 的构造细节。
  */
 static void prvEdfInitTask(htTCB_t *pxTask)
 {
@@ -37,7 +40,20 @@ static void prvEdfInitTask(htTCB_t *pxTask)
 }
 
 /**
- * @brief 策略初始化：清空漏期计数，并把已有任务都标成无死期。
+ * @brief 策略重新接管任务时的复位：保留已登记的死期，只清掉漏期记账。
+ *
+ * @note 死期是调用方通过 htSchedSetDeadline() 设置的任务参数，热切换时必须保留；
+ *       "这个死期是否已经记过漏期"是策略自己的记账，重新接管后从零开始。
+ */
+static void prvEdfResetTask(htTCB_t *pxTask)
+{
+	if (pxTask != NULL) {
+		pxTask->ucDeadlineMissed = 0U;
+	}
+}
+
+/**
+ * @brief 策略初始化：清空漏期计数，让已有任务按当前死期重新接受监督。
  */
 static void prvEdfInitialise(void)
 {
@@ -47,7 +63,7 @@ static void prvEdfInitialise(void)
 	s_ulDeadlineMisses = 0U;
 
 	for (UBaseType_t uxIndex = 0U; (uxIndex < uxCount) && (pxItem != NULL); uxIndex++) {
-		prvEdfInitTask((htTCB_t *)htListGetItemOwner(pxItem));
+		prvEdfResetTask((htTCB_t *)htListGetItemOwner(pxItem));
 		pxItem = htListGetNext(pxItem);
 	}
 }

@@ -7,7 +7,7 @@
  * 修改 Scheduling 核心 —— 对扩展开放、对修改关闭（开闭原则）。
  *
  * 五个操作按"何时被调用"拆开，策略只需实现自己关心的那些（接口隔离）：
- *   vInitialise    策略被选中时调用一次，清空策略自己的全局状态；
+ *   vInitialise    策略被登记或重新启用时调用一次，重置策略自己的记账状态；
  *   vTaskCreated   任务初始化完成后调用，给新任务写策略私有字段；
  *   vTick          每个滴答在关中断状态下调用，做策略记账；
  *   pxSelectNext   从就绪任务里选出下一个该跑的，返回 NULL 表示无候选；
@@ -34,12 +34,20 @@ typedef struct htSchedPolicy {
 } htSchedPolicy_t;
 
 /**
- * @brief 切换调度策略。
+ * @brief 切换调度策略：启动前是登记，启动后是热切换。
  *
  * @param[in] pxPolicy 目标策略对象，必须提供 pxSelectNext 与 xShouldPreempt。
- * @return 成功返回 htPASS；空指针、缺少必需操作或调度器已启动时返回 htFAIL。
+ * @return 成功返回 htPASS；空指针或缺少必需操作返回 htFAIL。
  *
- * @note 必须在 htStartScheduler() 之前调用；已创建的任务会立即套用新策略。
+ * @note 两种调用时机语义一致：换掉策略指针，再调用新策略的 vInitialise() 让它接管
+ *       已有任务。启动后切换还会立即让出一次 CPU，使新策略马上参与选择，不必等
+ *       下一个滴答。整个过程在临界区内完成，滴答中断不会看到半新半旧的状态。
+ * @note 重复登记同一个对象是空操作，不会清掉策略已经积累的运行状态。
+ * @note 热切换会重置策略的记账状态（虚拟时间、当前任务视图），但保留调用方用
+ *       htSchedSetWeight() / htSchedSetDeadline() 显式设置的任务参数。切到 EDF 时
+ *       需要按新策略重新登记死期。
+ * @note 在中断服务程序里调用也会生效，但不会主动让出 CPU：切换由中断退出时的
+ *       PendSV 完成。正常用法是任务上下文。
  */
 BaseType_t htSchedSetPolicy(const htSchedPolicy_t *pxPolicy);
 

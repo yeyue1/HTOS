@@ -111,25 +111,58 @@ const htSchedPolicy_t htSchedPolicyFixedPriority = {
 };
 
 /**
- * @brief 切换调度策略，只允许在调度器启动之前调用。
+ * @brief 判断策略对象是否满足内核的最低要求：两个必需操作都必须存在。
+ */
+static BaseType_t prvPolicyIsUsable(const htSchedPolicy_t *pxPolicy)
+{
+	if (pxPolicy == NULL) {
+		return htFALSE;
+	}
+
+	return (pxPolicy->pxSelectNext != NULL && pxPolicy->xShouldPreempt != NULL) ? htTRUE : htFALSE;
+}
+
+/**
+ * @brief 切换调度策略：启动前登记，启动后热切换。
+ *
+ * @note 三步走，顺序不可颠倒：
+ *       1) 换指针——此后 tick 记账与任务创建回调都落到新策略上；
+ *       2) 调 vInitialise()——让新策略接管已经存在的任务；
+ *       3) 已启动则 htTaskYield()——立刻按新规则重选一次，而不是等下一个滴答。
+ *       前两步在临界区内完成，因此滴答中断永远看不到"指针已换、状态未接管"的中间态。
  */
 BaseType_t htSchedSetPolicy(const htSchedPolicy_t *pxPolicy)
 {
 	/* 策略必须提供两个必需操作，否则内核无法工作。 */
-	if (pxPolicy == NULL || pxPolicy->pxSelectNext == NULL || pxPolicy->xShouldPreempt == NULL) {
+	if (prvPolicyIsUsable(pxPolicy) == htFALSE) {
 		return htFAIL;
 	}
 
-	/* 启动之后换策略相当于在飞行中换发动机，直接拒绝。 */
-	if (htSchedulerIsStarted() != htFALSE) {
-		return htFAIL;
+	/* 进来先关中断：读当前策略、换指针、重置状态必须是一个原子动作。 */
+	htEnterCritical();
+
+	/* 重复登记同一个对象是空操作：不要因此清掉策略已经积累的运行状态。 */
+	if (pxSchedulerPolicy == pxPolicy) {
+		htExitCritical();
+		return htPASS;
 	}
 
+	/* 是否已启动决定切换后要不要主动让出 CPU，必须在换指针前读。 */
+	BaseType_t xSchedulerRunning = htSchedulerIsStarted();
+
+	/* 第一步：换指针。 */
 	pxSchedulerPolicy = pxPolicy;
 
-	/* 让新策略清空自己的私有状态，并把已有任务纳入管理。 */
+	/* 第二步：让新策略按自己的规则接管已有任务。 */
 	if (pxPolicy->vInitialise != NULL) {
 		pxPolicy->vInitialise();
+	}
+
+	htExitCritical();
+
+	/* 第三步：运行中切换时立刻重选，否则新策略要等到下一个滴答才生效。 */
+	if (xSchedulerRunning != htFALSE) {
+		htTaskYield();
 	}
 
 	return htPASS;
