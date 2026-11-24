@@ -11,6 +11,7 @@
 #include "httask.h"
 #include "htlist.h"
 #include "stm32f1xx_hal.h"
+#include "htschedpolicy.h"
 #include <stddef.h> /* 提供 NULL 定义 */
 #include <stdio.h> /* 提供 printf 定义 */
 #include "core_cm3.h" /* 提供 NVIC 与 SCB 定义 */
@@ -255,41 +256,12 @@ void htTaskSwitchContext(void)
 	htTaskCheckStackSentinel(pxCurrentTCB);
 #endif
 
-	/* 从最高优先级向下找第一个非空的就绪链表。 */
-	UBaseType_t uxTopPriority = 0;
-	uint32_t safetyCounter = 0;
-	const uint32_t MAX_ITERATIONS = 32;
-
-	/* 循环上限 32 只是防御：链表被踩坏时不至于死循环在调度器里。 */
-	for (uxTopPriority = configMAX_PRIORITIES - 1; uxTopPriority > 0 && safetyCounter < MAX_ITERATIONS;
-			uxTopPriority--) {
-		safetyCounter++;
-		if (htListGetCurrentNumberOfItems(&(pxReadyTasksLists[uxTopPriority])) > 0) {
-			break;
-		}
-	}
-
-	/* 取该优先级的就绪链表。 */
-	htList_t *pxList = &(pxReadyTasksLists[uxTopPriority]);
-
-	/* 从当前索引向后轮转，跳过列表尾哨兵。 */
-	htListItem_t *pxNextTCB = htListGetNext(pxList->pxIndex);
-	if (pxNextTCB == &(pxList->xListEnd)) {
-		pxNextTCB = htListGetNext(pxNextTCB);
-	}
-
-	/* 找到候选项目后推进轮转索引并切换。 */
-	if (pxNextTCB != NULL) {
-		/* 推进轮转索引，使同优先级任务下次从下一个开始。 */
-		pxList->pxIndex = pxNextTCB;
-
-		/* 从链表项取回 TCB；属主非法时保持当前任务不变。 */
-		htTCB_t *pxNewTCB = (htTCB_t *)htListGetItemOwner(pxNextTCB);
-		if (pxNewTCB != NULL) {
-			/* 标记为运行态并把它设为当前任务。 */
-			pxNewTCB->uxTaskState = HT_TASK_RUNNING;
-			pxCurrentTCB = pxNewTCB;
-		}
+	/* 具体选谁由当前策略决定：内核只认策略接口，不认识任何具体算法。 */
+	htTCB_t *pxNewTCB = htSchedGetPolicy()->pxSelectNext();
+	if (pxNewTCB != NULL) {
+		/* 标记为运行态并把它设为当前任务。 */
+		pxNewTCB->uxTaskState = HT_TASK_RUNNING;
+		pxCurrentTCB = pxNewTCB;
 	}
 }
 
@@ -337,8 +309,6 @@ void htSchedulerResume(void)
  */
 BaseType_t htSchedulerNeedsSwitch(void)
 {
-	BaseType_t xSwitchRequired = htFALSE;
-
 	/*
 	 * 调度器尚未运行之前绝不请求上下文切换。
 	 *
@@ -353,39 +323,17 @@ BaseType_t htSchedulerNeedsSwitch(void)
 	}
 
 	/*
-	 * 滴答本身只在抢占式模式下触发切换。
-	 *
-	 * configUSE_PREEMPTION == 0 时这里是协作式调度：一个任务跑到主动让出
-	 * （htTaskDelay/阻塞/htTaskYield）为止才换人，滴答不再横插一脚。让出
-	 * 动作走 htTaskYield() 直接置位 PendSV，与本函数无关，所以关闭抢占
-	 * 不会导致"永远不切换"。空闲任务另需主动 yield，见 htprvIdleTask()。
+	 * 是否切换、什么时候切换，全部交给当前策略判断：固定优先级策略看"有更高
+	 * 优先级就绪"与"同优先级有兄弟"，公平分享策略看虚拟时间，最早死期策略看
+	 * 死期。内核在这里只做"调度器是否在运行"这一层通用守卫。
 	 */
-#if (configUSE_PREEMPTION == 1)
-	if (pxCurrentTCB != NULL) {
-		UBaseType_t uxCurrentPriority = pxCurrentTCB->uxPriority;
+	return htSchedGetPolicy()->xShouldPreempt(pxCurrentTCB);
+}
 
-		/* 有更高优先级任务就绪就需要切换。 */
-		for (UBaseType_t uxPriority = configMAX_PRIORITIES - 1; uxPriority > uxCurrentPriority; uxPriority--) {
-			if (htListGetCurrentNumberOfItems(&(pxReadyTasksLists[uxPriority])) > 0) {
-				xSwitchRequired = htTRUE;
-				break;
-			}
-		}
-
-#if (configUSE_TIME_SLICING == 1)
-		/*
-		 * 时间片轮转：同优先级存在兄弟任务时同样要请求切换。
-		 *
-		 * 只判断"更高优先级"会让同优先级的多任务退化为严格先来先服务——先创建的
-		 * 那个除非自己阻塞，否则后创建者永远拿不到 CPU。htTaskSwitchContext()
-		 * 本来就会推进 pxList->pxIndex 完成列表内轮转，缺的只是这个触发条件。
-		 */
-		if (xSwitchRequired == htFALSE && htListGetCurrentNumberOfItems(&(pxReadyTasksLists[uxCurrentPriority])) > 1U) {
-			xSwitchRequired = htTRUE;
-		}
-#endif
-	}
-#endif /* configUSE_PREEMPTION */
-
-	return xSwitchRequired;
+/**
+ * @brief 调度器是否已经启动过。
+ */
+BaseType_t htSchedulerIsStarted(void)
+{
+	return (xSchedulerState == HT_SCHEDULER_NOT_STARTED) ? htFALSE : htTRUE;
 }

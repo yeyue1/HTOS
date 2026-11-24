@@ -144,6 +144,16 @@ BaseType_t htSchedulerNeedsSwitch(void)
 	return htFALSE;
 }
 
+/**
+ * @brief 恒返回 htFALSE：主机侧从不启动调度器，策略替换始终被允许。
+ *
+ * @return 固定为 htFALSE。
+ */
+BaseType_t htSchedulerIsStarted(void)
+{
+	return htFALSE;
+}
+
 /** @brief 空实现：主机侧没有启动汇编，仅用于满足链接。 */
 void vPortStartFirstTask(void) {}
 

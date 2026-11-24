@@ -49,6 +49,14 @@ void htResumeScheduler(void);
 void htSchedulerTickHandler(void);
 
 /**
+ * @brief 调度器是否已经启动过。
+ *
+ * @return 已启动（运行中或已挂起）返回 htTRUE，从未启动返回 htFALSE。
+ * @note 调度策略只允许在启动之前替换，本函数就是用来做这个判断的。
+ */
+BaseType_t htSchedulerIsStarted(void);
+
+/**
  * @brief 进入内核临界区，会关闭中断并累加嵌套计数。
  *
  * @note 必须先关中断再累加计数，顺序不可调换：若先加计数后关中断，

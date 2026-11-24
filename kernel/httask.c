@@ -11,6 +11,7 @@
 #include "htmem.h"
 #include "htlist.h"
 #include "htscheduler.h"
+#include "htschedpolicy.h"
 #include <string.h>
 #include "stm32f1xx_hal.h"
 #include "core_cm3.h" /* 提供 NVIC 与 ICSR 等内核寄存器定义 */
@@ -196,6 +197,9 @@ static BaseType_t prvInitialiseNewTask(TaskFunction_t pxTaskCode, const char *pc
 	pxNewTCB->uxTaskState = HT_TASK_READY;
 	htListInsertEnd(&(pxReadyTasksLists[uxPriority]), &(pxNewTCB->xStateListItem));
 	uxCurrentNumberOfTasks++;
+
+	/* 通知当前策略：新任务已经进入就绪表，策略可以初始化自己的私有字段。 */
+	htSchedNotifyTaskCreated(pxNewTCB);
 	if (pxCurrentTCB == NULL) {
 		pxCurrentTCB = pxNewTCB;
 	}
@@ -1176,6 +1180,8 @@ void htTaskTickInc(void)
 		pxOverflowDelayedTaskList = pxTemporary;
 	}
 
+	/* 让当前策略给刚过去的这个 tick 记账：公平策略累加虚拟时间，最早死期策略查漏期。 */
+	htSchedNotifyTick(pxCurrentTCB);
 	/* 把所有到期任务搬回就绪链表。 */
 	htTaskCheckDelayedTasks();
 

@@ -67,6 +67,14 @@ typedef struct htTaskControlBlock {
 	uint32_t ulRunTimeCounter; /**< 任务运行时间计数，供运行时统计使用 */
 	UBaseType_t uxStackDepth; /**< 栈深度，单位为 StackType_t（word） */
 	uint8_t ucStaticallyAllocated; /**< 非 0 表示 TCB 与栈由调用方提供，删除时不释放 */
+#if (configUSE_SCHED_POLICY_FAIR_SHARE == 1)
+	uint32_t ulVruntime; /**< 公平分享策略：虚拟运行时间，单位是步长 */
+	uint32_t ulStride; /**< 公平分享策略：每运行一个 tick 增加的虚拟时间，默认 1024 */
+#endif
+#if (configUSE_SCHED_POLICY_EDF == 1)
+	TickType_t ulDeadline; /**< 最早死期策略：绝对死期（tick），0 表示没有死期 */
+	uint8_t ucDeadlineMissed; /**< 最早死期策略：本次死期是否已经记过漏期 */
+#endif
 	/* uint32_t ulDelayTime;  原始延时值，仅调试时使用，当前已注释掉 */
 
 } htTCB_t;

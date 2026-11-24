@@ -24,7 +24,7 @@ TEST_SPECS = {
     },
     "test_mem.out": {"sources": ["test_mem.c", "unity.c", "../kernel/htmem.c"]},
     "test_task.out": {
-        "sources": ["test_task.c", "unity.c", "../kernel/httask.c", "../kernel/htlist.c"],
+        "sources": ["test_task.c", "unity.c", "../kernel/httask.c", "../kernel/htlist.c", "../kernel/htschedpolicy.c"],
         "extra_flags": [
             "-DHTOS_HOST_TEST",
             "-Wno-pointer-to-int-cast",
@@ -37,6 +37,20 @@ TEST_SPECS = {
     },
     "test_watchdog.out": {
         "sources": ["test_watchdog.c", "unity.c", "../kernel/htwatchdog.c"],
+    },
+    "test_schedpolicy.out": {
+        "sources": [
+            "test_schedpolicy.c",
+            "unity.c",
+            "../kernel/htschedpolicy.c",
+            "../kernel/htschedfair.c",
+            "../kernel/htschededf.c",
+            "../kernel/htlist.c",
+        ],
+        "extra_flags": [
+            "-DconfigUSE_SCHED_POLICY_FAIR_SHARE=1",
+            "-DconfigUSE_SCHED_POLICY_EDF=1",
+        ],
     },
 }
 
