@@ -47,6 +47,18 @@ TEST_SPECS = {
     "test_watchdog.out": {
         "sources": ["test_watchdog.c", "unity.c", "../kernel/htwatchdog.c"],
     },
+    "test_latency.out": {
+        "sources": [
+            "test_latency.c",
+            "unity.c",
+            "../kernel/htlatency.c",
+            "stubs/host_cmsis.c",
+        ],
+        "extra_flags": [
+            "-DconfigUSE_LATENCY_STATS=1",
+            "-Istubs",
+        ],
+    },
     "test_schedpolicy.out": {
         "sources": [
             "test_schedpolicy.c",
