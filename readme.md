@@ -53,6 +53,51 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 - `htEnterCritical()` **先关中断、再递增嵌套计数**。反序会留下一个可抢占窗口：计数已加、PRIMASK 仍为 0 时若被 SysTick 抢占，换出的上下文会多带一层嵌套，返回后 `htExitCritical()` 只能把计数减到 1，永远走不到恢复中断的分支，PRIMASK 永久置位而系统**静默死锁**（不触发任何 fault）。
 - 因此临界区必须短小，且不得在临界区内调用可能阻塞的 API。
 
+### 实时性仪表
+
+`configUSE_LATENCY_STATS` 为 1 时，内核顺手记录两类实时性指标，不需要额外的测量任务或探针：
+
+- **最长关中断临界区**：峰值周期数、峰值发生时的返回地址、调用次数、累计周期数，以及一张 8 桶直方图（边界 1/2/4/8/16/32/64 µs 和一个溢出桶）。
+- **SysTick 处理时长**：峰值、次数、累计。这个窗口包含 tick 内部关中断的那一段时间，但并不包含中断响应延迟本身。
+
+计量点嵌在既有路径上，而不是另开采样：
+
+- `htEnterCritical()` 在 `uxCriticalNesting` 由 0 变 1 时读一次 `DWT->CYCCNT` 和调用点；`htExitCritical()` 在嵌套回落到 0 **之前**结算，所以嵌套临界区只统计最外层，且结算发生在 `cpsie i` 之前，不会把随后到来的中断算进这段临界区。
+- `htTaskTickInc()` 在关中断之后取起始周期，在 `__enable_irq()` 之前结算。
+- 快照与复位用 `__get_PRIMASK()` / `__set_PRIMASK()` 直接关中断，**刻意不走 `htEnterCritical()`**，否则仪表会统计自己。
+
+```c
+htLatencySnapshot_t snapshot;
+
+htLatencyGetSnapshot(&snapshot);
+uint32_t ulMaxUs = htLatencyCyclesToUs(snapshot.ulCriticalMaxCycles);
+uint32_t ulTickUs = htLatencyCyclesToUs(snapshot.ulTickMaxCycles);
+/* snapshot.ulCriticalCaller 可交给 addr2line 反解 */
+```
+
+实板实测（STM32F103C8T6，72 MHz，Debug `-O0` 构建，25 s 抓包）：
+
+| 指标 | 读数 |
+|------|------|
+| 临界区峰值 | 3 µs（`0x08000e22` → `htWatchdogCheck()`，8 条表项扫描） |
+| 临界区均值 | 2 µs，25 s 内约 423 万次调用，溢出桶为 0 |
+| SysTick 峰值 | 23 µs |
+| SysTick 均值 | 18 µs（`-O0` 下偏大；Release 构建会明显下降） |
+
+精度校验做过一次反向验证：在 `main()` 启动后人为制造恰好 2 ms 的关中断自旋，仪表读出
+`crit max=2000us caller=0x0800185d`，`addr2line` 把该地址解回 `main()` 中制造自旋的那一行，
+溢出桶同时从 0 变成 1。读数与调用点都对得上，说明周期差换算和峰值/调用点配对没有错位。
+
+启用与代价：
+
+- 构建层 `-DHTOS_LATENCY_STATS=ON`（CMake 选项 `HTOS_LATENCY_STATS`），默认关闭。
+- 关闭时四个埋点宏展开成 `((void)0)`，代码与数据**零增量**（text 11632 / data 28 / bss 5808）。
+- 打开时 text 12388 / data 28 / bss 5880，即 **+756 字节 Flash、+72 字节 RAM**。
+- 桶边界由 `configCPU_CLOCK_HZ`（默认 72000000）换算，改主频时必须同步该宏，否则 µs 读数失真。
+
+限制：只覆盖内核显式临界区和 tick 处理，不测中断响应延迟与 ISR 时长；不测单次抖动的分布
+只给桶计数；`DWT->CYCCNT` 在调试器暂停时不会停表，调试读数的绝对值仅作参考。
+
 ## 配置开关
 
 `include/htconfig.h` 中的宏现在都接入实现，没有“设了也不生效”的开关：`configUSE_PREEMPTION`、
@@ -62,9 +107,10 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 `configUSE_IDLE_HOOK`、`configCHECK_FOR_STACK_OVERFLOW`、`configUSE_TICK_HOOK`、
 `configUSE_MALLOC_FAILED_HOOK`、`configGENERATE_RUN_TIME_STATS`、
 `configUSE_STATS_FORMATTING_FUNCTIONS`、`configUSE_SCHED_POLICY_FAIR_SHARE`、
-`configUSE_SCHED_POLICY_EDF`。其中 `configTOTAL_HEAP_SIZE`、`configUSE_QUEUE_SETS`、
-`configUSE_STATS_FORMATTING_FUNCTIONS` 与两个调度策略开关允许在构建层用 `-D` 覆盖
-（两个策略默认都是 0，关闭时不编译任何策略代码）。
+`configUSE_SCHED_POLICY_EDF`、`configUSE_LATENCY_STATS`。其中 `configTOTAL_HEAP_SIZE`、
+`configUSE_QUEUE_SETS`、`configUSE_STATS_FORMATTING_FUNCTIONS`、`configUSE_LATENCY_STATS`
+与两个调度策略开关允许在构建层用 `-D` 覆盖（策略与仪表默认都是 0，关闭时不编译任何相关代码）。
+`configCPU_CLOCK_HZ`（默认 72000000）同样是 `#ifndef` 数值开关，实时性仪表的微秒换算依赖它。
 
 两个钩子都是**弱符号**，不提供同名强符号也能编译通过，默认实现什么也不做：
 
