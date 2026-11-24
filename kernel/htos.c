@@ -17,6 +17,7 @@
 #include "htqueue.h"
 #include "htsemaphore.h"
 #include "htutils.h"
+#include "htlatency.h"
 #include "stm32f1xx.h"
 
 /** 主版本号。 */
@@ -61,6 +62,11 @@ int htOSInit(void)
 	if (gOSInitialized) {
 		return 0; /* 已经初始化，直接返回。 */
 	}
+
+#if (configUSE_LATENCY_STATS == 1)
+	/* 先打开 DWT 周期计数器，后面的临界区才有可能被计量。 */
+	htLatencyInit();
+#endif
 
 	/* 清零滴答计数器，保证运行时间从 0 开始累计。 */
 	xTickCount = 0;

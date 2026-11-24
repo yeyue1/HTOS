@@ -12,6 +12,7 @@
 #include "htlist.h"
 #include "htscheduler.h"
 #include "htschedpolicy.h"
+#include "htlatency.h"
 #include <string.h>
 #include "stm32f1xx_hal.h"
 #include "core_cm3.h" /* 提供 NVIC 与 ICSR 等内核寄存器定义 */
@@ -1170,6 +1171,8 @@ void htTaskTickInc(void)
 {
 	/* 整段处理在关中断下完成，保证 tick 递增与延时时序一致。 */
 	__disable_irq();
+	/* 实时性仪表：从进入 tick 处理开始计时，窗口包含下面这段关中断时间。 */
+	HT_LATENCY_TICK_BEGIN();
 
 	/* 递增系统滴答计数。 */
 	xTickCount++;
@@ -1192,6 +1195,9 @@ void htTaskTickInc(void)
 			SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
 		}
 	}
+	/* 结算 tick 处理耗时，仍然在关中断范围内，不会把开中断后的时间算进来。 */
+	HT_LATENCY_TICK_END();
+
 	/* 重新开中断。 */
 	__enable_irq();
 }

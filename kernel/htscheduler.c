@@ -12,6 +12,7 @@
 #include "htlist.h"
 #include "stm32f1xx_hal.h"
 #include "htschedpolicy.h"
+#include "htlatency.h"
 #include <stddef.h> /* 提供 NULL 定义 */
 #include <stdio.h> /* 提供 printf 定义 */
 #include "core_cm3.h" /* 提供 NVIC 与 SCB 定义 */
@@ -207,6 +208,8 @@ void htEnterCritical(void)
 	 */
 	__asm volatile("cpsid i");
 	uxCriticalNesting++;
+	/* 最外层（0 -> 1）才开始计时，嵌套进去的临界区不单独计。 */
+	HT_LATENCY_CRITICAL_ENTER();
 }
 
 /**
@@ -218,6 +221,8 @@ void htExitCritical(void)
 {
 	/* 防御：计数为 0 时直接返回，避免无符号下溢后永久关中断。 */
 	if (uxCriticalNesting > 0) {
+		/* 在计数减到 0 之前结算：结算完再 cpsie i，不会把随后到来的中断算进来。 */
+		HT_LATENCY_CRITICAL_EXIT();
 		uxCriticalNesting--;
 
 		/* 只有最外层退出才执行 cpsie i。 */

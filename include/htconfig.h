@@ -15,6 +15,16 @@
 /** 系统滴答频率，单位 Hz；htTimeToTicks()/htTicksToTime() 依赖它换算毫秒与滴答。 */
 #define configTICK_RATE_HZ 1000
 
+/**
+ * CPU 主频，单位 Hz；实时性仪表用它把周期数换算成微秒。
+ *
+ * 本项可用 -DconfigCPU_CLOCK_HZ=... 在构建层覆盖：换主频只改这一处，
+ * 不要在各个 .c 里散落魔数。默认值与 STM32F103C8T6 的 72 MHz 一致。
+ */
+#ifndef configCPU_CLOCK_HZ
+#define configCPU_CLOCK_HZ 72000000UL
+#endif
+
 /** 最大任务优先级个数；合法优先级为 0 ~ configMAX_PRIORITIES-1，数值越大优先级越高。 */
 #define configMAX_PRIORITIES 32
 
@@ -61,6 +71,19 @@
  * 被写穿则调用 htStackOverflowHook()。置 0 可把相关代码从固件里裁掉。
  */
 #define configCHECK_FOR_STACK_OVERFLOW 1
+
+/**
+ * 1 = 编入实时性仪表：记录最长关中断临界区的周期数、发生位置与调用次数，
+ * 以及 SysTick 处理时长的峰值与累计值，附带一张 8 桶直方图。
+ *
+ * 时间基准是 Cortex-M3 的 DWT->CYCCNT，不占用额外定时器。埋点只在临界区进出
+ * 与 tick 处理的固定位置各加一次计数器读取，不新增任务、不开采样中断。
+ * 本项通过 #ifndef 允许构建层覆盖；置 0（默认）时埋点宏展开为 ((void)0)，
+ * 关闭态不产生任何代码与数据。
+ */
+#ifndef configUSE_LATENCY_STATS
+#define configUSE_LATENCY_STATS 0
+#endif
 
 /* ------------------------------------------------------------------ */
 /* 4. 钩子函数                                                         */
