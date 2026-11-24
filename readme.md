@@ -12,6 +12,7 @@ HTOS 是一个面向 ARM Cortex-M3 的轻量级学习型 RTOS 内核。它提供
 
 - 支持动态创建任务，也可用 `htTaskCreateStatic()` 由调用方提供 TCB 与任务栈，避免运行期堆分配。
 - 优先级抢占和同优先级轮转。
+- 调度策略可插拔（`include/htschedpolicy.h`）：默认固定优先级，另有按权重分配同优先级 CPU 的公平分享策略与最早死期优先策略，见下文“可插拔调度策略”一节。
 - `htTaskDelay()` 相对延时，支持 32 位 tick 回绕。
 - `htTaskDelayUntil()` 绝对周期延时，避免周期任务逐次漂移；错过本周期截止点时返回 `htFAIL`。
 - 任务优先级查询/修改、挂起/恢复、ISR 恢复、状态/名称/当前句柄查询。
@@ -77,19 +78,71 @@ static void MonitorTask(void *argument)
 
 > 注意：该机制只检查“任务还在推进”，不检查推进结果是否正确；也不覆盖中断服务程序卡死
 > （SysTick 停摆时心跳同样会停，因而仍会被复位）。
+
 ## 配置开关
 
 `include/htconfig.h` 中的宏并非全部生效。当前**已实现**：`configUSE_PREEMPTION`、
 `configUSE_TIME_SLICING`、`configMAX_PRIORITIES`、`configTOTAL_HEAP_SIZE`、
 `configMINIMAL_STACK_SIZE`、`configUSE_TASK_NOTIFICATIONS`、
 `configUSE_RECURSIVE_MUTEXES`、`configUSE_QUEUE_SETS`、`configSUPPORT_STATIC_ALLOCATION`、
-`configUSE_IDLE_HOOK`、`configCHECK_FOR_STACK_OVERFLOW`。
+`configUSE_IDLE_HOOK`、`configCHECK_FOR_STACK_OVERFLOW`、`configUSE_SCHED_POLICY_FAIR_SHARE`、
+`configUSE_SCHED_POLICY_EDF`（后两个默认 0，可在构建层用 `-D` 打开；关闭时不编译任何策略代码）。
 
 **尚未实现**的开关会在编译期直接 `#error` 中止，而不是静默忽略：
 `configGENERATE_RUN_TIME_STATS`、`configUSE_STATS_FORMATTING_FUNCTIONS`、`configUSE_TICK_HOOK`、
 `configUSE_MALLOC_FAILED_HOOK`。
 
-### 队列集
+### 可插拔调度策略
+
+调度器本身不认识任何具体算法：它只调用 `include/htschedpolicy.h` 里的一张操作表
+（`vInitialise` / `vTaskCreated` / `vTick` / `pxSelectNext` / `xShouldPreempt`），一个
+`const htSchedPolicy_t` 实例就是一个策略对象。新增算法只需写一个新的 const 实例并在启动前登记，
+不必改调度核心。内置三种：
+
+- `htSchedPolicyFixedPriority`（默认）：优先级高者先跑，同优先级按时间片轮转，行为与改动前一致。
+- `htSchedPolicyFairShare`（`configUSE_SCHED_POLICY_FAIR_SHARE`）：优先级仍是硬边界，同一优先级内
+  按权重分配 CPU。记账用 stride 整数加法（`ulVruntime += 1048576 / weight`），没有除法、没有 64 位、
+  没有红黑树；tick 回绕用有符号差值比较。
+- `htSchedPolicyEdf`（`configUSE_SCHED_POLICY_EDF`）：同样先取最高优先级的就绪档，这一档里死期最近的
+  先跑；该档里没有登记死期的任务时退化为固定优先级轮转。
+
+策略必须在启动调度器之前登记（运行中替换会让正在等待的任务失去原策略的语义）：
+
+```c
+#if (configUSE_SCHED_POLICY_FAIR_SHARE == 1)
+	if (htSchedSetPolicy(&htSchedPolicyFairShare) != htPASS) {
+		/* 策略对象不完整或调度器已启动 */
+	}
+	(void)htSchedSetWeight(s_logger_task, 2048U);   /* 标准份额 1024，本行等于 2 倍 */
+#endif
+
+#if (configUSE_SCHED_POLICY_EDF == 1)
+	(void)htSchedSetPolicy(&htSchedPolicyEdf);
+	(void)htSchedSetDeadline(s_control_task, xTickCount + 8U);   /* 8 ms 后到期 */
+#endif
+```
+
+公平分享只对**可运行**任务分配 CPU 份额：睡着的任务不攒配额，唤醒时虚拟时间会被抬到
+`下界 - 4 个 tick` 附近（对应 Linux 的 `place_entity()`），避免“睡一觉回来独占 CPU”。
+EDF 的周期任务每轮都要重新登记死期，否则下一次漏期不会被识别；漏期次数用
+`htSchedEdfGetDeadlineMisses()` 读取，`htSchedEdfClearDeadlineMisses()` 清零。
+
+实板 A/B（同一优先级放两个满负荷任务，各自 128 word 栈；20 s 抓包、每 1 s 采样）：
+
+| 策略 | 配置 | 实测一方 CPU 份额 |
+| --- | --- | --- |
+| 固定优先级 | 时间片轮转 | 499‰ : 501‰（50 : 50） |
+| 公平分享 | 权重 1024 : 2048 | 330‰ : 670‰（33 : 67） |
+| 最早死期 | 死期 500 : 1500；8 s 后双双取消；16 s 后重新登记 | 1000‰ : 0 → 两档交替（退化为轮转）→ 1000‰ : 0 |
+
+代价（实测于同一份测量固件）：关闭时零成本，整块代码被 `--gc-sections` 裁掉；打开公平分享
+约 +580 字节 Flash，打开最早死期约 +150 字节 Flash；TCB 各 +8 字节/任务（三个任务即 +24 字节）。
+tick 记账只多一次 32 位加法，抢占判断仍是 O(同档任务数)。
+
+注意：公平分享与 EDF 都只在**同一优先级内**重排，跨优先级仍是高优先级绝对优先；
+需要全局公平（把优先级降级为权重）属于另一种语义，本内核不提供，以免破坏硬实时任务的抖动上限。
+
+### 队列集 htQueueSetCreate()
 
 `configUSE_QUEUE_SETS` 为 1（默认）时，可以把多个队列/信号量聚成一个集合，用一次调用等待
 “其中任意一个有数据”，不必逐个轮询：
