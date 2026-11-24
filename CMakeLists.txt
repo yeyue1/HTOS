@@ -169,6 +169,13 @@ set(HTOS_HEAP_BYTES 0 CACHE STRING "TLSF heap size in bytes for the firmware (0 
 # (the table buffer lives on the caller's stack), so it stays off by default.
 option(HTOS_STATS_FORMATTING "Compile htTaskList() and print it at boot" OFF)
 
+# --- Latency instrument ------------------------------------------------------
+# HTOS_LATENCY_STATS=ON compiles the critical-section / tick-ISR instrument in and
+# makes app/ print a "[lat]" summary line every 10 log periods (~5 s). It stays off
+# by default: the instrument costs ~80 bytes of .bss plus a couple of DWT reads per
+# critical section, which is only worth paying when you are chasing jitter.
+option(HTOS_LATENCY_STATS "Compile the latency instrument and report it from the logger" OFF)
+
 # --- Compile definitions -----------------------------------------------------
 target_compile_definitions(htOS PRIVATE
   STM32F103xB
@@ -177,6 +184,10 @@ target_compile_definitions(htOS PRIVATE
 
 if(HTOS_STATS_FORMATTING)
   target_compile_definitions(htOS PRIVATE configUSE_STATS_FORMATTING_FUNCTIONS=1)
+endif()
+
+if(HTOS_LATENCY_STATS)
+  target_compile_definitions(htOS PRIVATE configUSE_LATENCY_STATS=1)
 endif()
 
 # --- Compile flags -----------------------------------------------------------
