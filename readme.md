@@ -96,7 +96,7 @@ static void MonitorTask(void *argument)
 
 调度器本身不认识任何具体算法：它只调用 `include/htschedpolicy.h` 里的一张操作表
 （`vInitialise` / `vTaskCreated` / `vTick` / `pxSelectNext` / `xShouldPreempt`），一个
-`const htSchedPolicy_t` 实例就是一个策略对象。新增算法只需写一个新的 const 实例并在启动前登记，
+`const htSchedPolicy_t` 实例就是一个策略对象。新增算法只需写一个新的 const 实例并登记，
 不必改调度核心。内置三种：
 
 - `htSchedPolicyFixedPriority`（默认）：优先级高者先跑，同优先级按时间片轮转，行为与改动前一致。
@@ -106,21 +106,34 @@ static void MonitorTask(void *argument)
 - `htSchedPolicyEdf`（`configUSE_SCHED_POLICY_EDF`）：同样先取最高优先级的就绪档，这一档里死期最近的
   先跑；该档里没有登记死期的任务时退化为固定优先级轮转。
 
-策略必须在启动调度器之前登记（运行中替换会让正在等待的任务失去原策略的语义）：
+策略既可以在启动前登记，也可以在运行中热切换：`htSchedSetPolicy()` 在两种时机语义一致——
+换掉策略对象，再让新策略接管现有任务。
 
 ```c
 #if (configUSE_SCHED_POLICY_FAIR_SHARE == 1)
+	/* 启动前登记：行为最可预测，推荐 */
 	if (htSchedSetPolicy(&htSchedPolicyFairShare) != htPASS) {
-		/* 策略对象不完整或调度器已启动 */
+		/* 策略对象不完整（pxSelectNext / xShouldPreempt 为空） */
 	}
 	(void)htSchedSetWeight(s_logger_task, 2048U);   /* 标准份额 1024，本行等于 2 倍 */
 #endif
 
 #if (configUSE_SCHED_POLICY_EDF == 1)
-	(void)htSchedSetPolicy(&htSchedPolicyEdf);
-	(void)htSchedSetDeadline(s_control_task, xTickCount + 8U);   /* 8 ms 后到期 */
+	/* 运行中热切换：例如收到命令后从固定优先级切到 EDF */
+	if (htSchedSetPolicy(&htSchedPolicyEdf) == htPASS) {
+		(void)htSchedSetDeadline(s_control_task, xTickCount + 8U);   /* 8 ms 后到期 */
+	}
 #endif
 ```
+
+热切换的边界（每一条都有主机测试覆盖）：
+
+- 原子：换指针、初始化、退出都在同一个临界区里，tick 中断看不到“半个策略”。
+- 立即生效：调度器已启动时额外补一次 `htTaskYield()`，下一次选择就走新策略，不必等下一个滴答；
+  在中断里调用同样生效，实际切换由中断退出时的 PendSV 完成。
+- 幂等：重复登记同一个策略对象是空操作，不会清掉已积累的记账。
+- 只重置记账，不动任务参数：虚拟时间、漏期标志清零，但 `htSchedSetWeight()` /
+  `htSchedSetDeadline()` 设过的权重与死期保留，切回来还在。
 
 公平分享只对**可运行**任务分配 CPU 份额：睡着的任务不攒配额，唤醒时虚拟时间会被抬到
 `下界 - 4 个 tick` 附近（对应 Linux 的 `place_entity()`），避免“睡一觉回来独占 CPU”。
