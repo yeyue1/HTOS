@@ -88,8 +88,12 @@
 /** 1 = 提供计数信号量接口（htSemaphoreCreateCounting 系列）。 */
 #define configUSE_COUNTING_SEMAPHORES 1
 
-/** 队列集开关；队列集尚未实现，只允许 0，置 1 会在下方触发 #error。 */
-#define configUSE_QUEUE_SETS 0
+/**
+ * 1 = 编入队列集（htQueueSetCreate 系列）：把多个队列/信号量聚成一个集合，
+ * 用一次 htQueueSelectFromSet() 等待其中任意一个有数据，而不是逐个轮询。
+ * 置 0 时相关 API 与每个队列上的集合字段一起被裁掉；置 1 时每个队列固定多占 12 字节。
+ */
+#define configUSE_QUEUE_SETS 1
 
 /** 1 = 编入任务通知 API（htTaskNotify* 系列）。 */
 #define configUSE_TASK_NOTIFICATIONS 1
@@ -111,12 +115,8 @@
  * 配置项静默失效比缺少该功能更难排查——使用者会以为自己已经关掉了某项功能去省 Flash，
  * 或者以为打开了某个钩子。这里让它们在编译期直接失败，把"没有实现"变成一条明确的编译错误。
  *
- * 实现其中某项后，把对应的 #if 删掉即可。
+ * 实现其中某项后，把对应的 #if 删掉即可；configUSE_QUEUE_SETS 就是这样摘掉拦截的。
  */
-#if (configUSE_QUEUE_SETS != 0)
-#error "configUSE_QUEUE_SETS: queue sets are not implemented"
-#endif
-
 #if (configGENERATE_RUN_TIME_STATS != 0)
 #error "configGENERATE_RUN_TIME_STATS: runtime stats are stubs, htGetCPUUsage() returns 0"
 #endif
