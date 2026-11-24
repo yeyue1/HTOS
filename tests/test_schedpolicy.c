@@ -29,6 +29,8 @@ TickType_t xTickCount;
 
 /** 调度器是否已启动，由用例控制。 */
 static BaseType_t xSchedulerStarted;
+/** 热切换策略时内核会请求一次重选；这里只计数，真实内核写 PendSV。 */
+static UBaseType_t uxYieldRequests;
 /** 临界区嵌套计数，用例末尾断言归零。 */
 static UBaseType_t uxCriticalNesting;
 
@@ -52,6 +54,12 @@ void htExitCritical(void)
 	}
 }
 
+/** @brief 让出 CPU 的桩：热切换应该在启动后请求一次重选。 */
+void htTaskYield(void)
+{
+	uxYieldRequests++;
+}
+
 /* ------------------------------------------------------------------ */
 /* 2. 夹具                                                             */
 /* ------------------------------------------------------------------ */
@@ -73,6 +81,10 @@ static void setup(void)
 	xTickCount = 0U;
 	xSchedulerStarted = htFALSE;
 	uxCriticalNesting = 0U;
+	uxYieldRequests = 0U;
+
+	/* 每个用例都从默认策略开始，避免上一个用例的策略状态泄漏到下一个。 */
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(&htSchedPolicyFixedPriority));
 
 	memset(xTasks, 0, sizeof(xTasks));
 	for (UBaseType_t uxIndex = 0U; uxIndex < 3U; uxIndex++) {
@@ -138,9 +150,11 @@ static void test_registry_rejects_invalid_policy(void)
 	TEST_ASSERT(htSchedGetPolicy() == &htSchedPolicyFixedPriority);
 	TEST_ASSERT(0 == strcmp(htSchedGetPolicy()->pcName, "fixed-priority"));
 
-	/* 启动之后不允许换策略。 */
+	/* 启动之后允许热切换：立即生效，并请求一次重选。 */
 	xSchedulerStarted = htTRUE;
-	TEST_ASSERT_EQUAL(htFAIL, htSchedSetPolicy(&htSchedPolicyFixedPriority));
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(&htSchedPolicyFairShare));
+	TEST_ASSERT(htSchedGetPolicy() == &htSchedPolicyFairShare);
+	TEST_ASSERT_EQUAL(1, (int)uxYieldRequests);
 	TEST_ASSERT_EQUAL(0, (int)uxCriticalNesting);
 }
 
@@ -350,6 +364,81 @@ static void test_edf_counts_each_miss_once(void)
 	TEST_ASSERT_EQUAL(0, (int)uxCriticalNesting);
 }
 
+/* ------------------------------------------------------------------ */
+/* 7. 运行时切换策略                                                   */
+/* ------------------------------------------------------------------ */
+
+static void test_runtime_switch_resets_accounting_but_keeps_weights(void)
+{
+	const htSchedPolicy_t *pxFair = &htSchedPolicyFairShare;
+
+	setup();
+	prvAddReady(&xTasks[0]);
+	prvAddReady(&xTasks[1]);
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(pxFair));
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetWeight(&xTasks[1], 2048U));
+	TEST_ASSERT_EQUAL(512, (int)xTasks[1].ulStride);
+
+	/* 启动后跑一段，让正在运行的任务积累虚拟时间。 */
+	xSchedulerStarted = htTRUE;
+	pxCurrentTCB = &xTasks[0];
+	for (UBaseType_t uxTick = 0U; uxTick < 100U; uxTick++) {
+		pxFair->vTick(pxCurrentTCB);
+	}
+	TEST_ASSERT(xTasks[0].ulVruntime != 0U);
+
+	/* 切走再切回：记账状态清零，用户设置的权重原封不动。 */
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(&htSchedPolicyFixedPriority));
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(pxFair));
+	TEST_ASSERT_EQUAL(0, (int)xTasks[0].ulVruntime);
+	TEST_ASSERT_EQUAL(0, (int)xTasks[1].ulVruntime);
+	TEST_ASSERT_EQUAL(512, (int)xTasks[1].ulStride);
+	TEST_ASSERT_EQUAL((int)HT_SCHED_DEFAULT_WEIGHT, (int)xTasks[0].ulStride);
+
+	/* 两次热切换各请求一次重选；重复登记同一个对象不再请求。 */
+	TEST_ASSERT_EQUAL(2, (int)uxYieldRequests);
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(pxFair));
+	TEST_ASSERT_EQUAL(2, (int)uxYieldRequests);
+	TEST_ASSERT_EQUAL(0, (int)uxCriticalNesting);
+}
+
+static void test_runtime_switch_to_edf_keeps_deadlines(void)
+{
+	setup();
+	prvAddReady(&xTasks[0]);
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(&htSchedPolicyEdf));
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetDeadline(&xTasks[0], 10U));
+
+	/* 让死期过期，制造一次漏期。 */
+	xTickCount = 100U;
+	pxCurrentTCB = &xTasks[0];
+	htSchedPolicyEdf.vTick(pxCurrentTCB);
+	TEST_ASSERT_EQUAL(1, (int)htSchedEdfGetDeadlineMisses());
+
+	/* 热切换走再切回：死期是任务参数要保留，漏期记账要清零。 */
+	xSchedulerStarted = htTRUE;
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(&htSchedPolicyFixedPriority));
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(&htSchedPolicyEdf));
+	TEST_ASSERT_EQUAL(10, (int)xTasks[0].ulDeadline);
+	TEST_ASSERT_EQUAL(0, (int)xTasks[0].ucDeadlineMissed);
+	TEST_ASSERT_EQUAL(0, (int)htSchedEdfGetDeadlineMisses());
+	TEST_ASSERT_EQUAL(0, (int)uxCriticalNesting);
+}
+
+static void test_runtime_switch_rejects_incomplete_policy(void)
+{
+	htSchedPolicy_t xIncomplete;
+
+	setup();
+	memset(&xIncomplete, 0, sizeof(xIncomplete));
+	xSchedulerStarted = htTRUE;
+
+	TEST_ASSERT_EQUAL(htFAIL, htSchedSetPolicy(&xIncomplete));
+	TEST_ASSERT(htSchedGetPolicy() == &htSchedPolicyFixedPriority);
+	TEST_ASSERT_EQUAL(0, (int)uxYieldRequests);
+	TEST_ASSERT_EQUAL(0, (int)uxCriticalNesting);
+}
+
 int main(void)
 {
 	UnityBegin("test_schedpolicy.c");
@@ -365,6 +454,9 @@ int main(void)
 	RUN_TEST(test_edf_tie_keeps_current_task);
 	RUN_TEST(test_edf_falls_back_to_priority);
 	RUN_TEST(test_edf_counts_each_miss_once);
+	RUN_TEST(test_runtime_switch_resets_accounting_but_keeps_weights);
+	RUN_TEST(test_runtime_switch_to_edf_keeps_deadlines);
+	RUN_TEST(test_runtime_switch_rejects_incomplete_policy);
 
 	return UnityEnd();
 }
