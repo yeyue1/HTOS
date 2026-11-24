@@ -42,11 +42,17 @@ static uint32_t s_ulMinVruntime = 0U;
 
 /**
  * @brief 把任务恢复到"刚加入公平队列"的状态。
+ *
+ * @note 步长由用户通过 htSchedSetWeight() 设置，是任务参数，热切换时必须保留；
+ *       只有从未设置过（步长为 0）的任务才落回标准份额。虚拟时间是策略的记账
+ *       状态，每次重新接管都清零，避免带着上一轮的差距进入新一轮比较。
  */
 static void prvFairInitTask(htTCB_t *pxTask)
 {
 	if (pxTask != NULL) {
-		pxTask->ulStride = HT_FAIR_DEFAULT_STRIDE;
+		if (pxTask->ulStride == 0U) {
+			pxTask->ulStride = HT_FAIR_DEFAULT_STRIDE;
+		}
 		pxTask->ulVruntime = 0U;
 	}
 }
