@@ -20,6 +20,7 @@
 #include "board.h"
 #include "htPort.h"
 #include "htconfig.h"
+#include "htlatency.h"
 #include "htmem.h"
 #include "htos.h"
 #include "httrace.h"
@@ -45,6 +46,9 @@
 /* 任务表：表头 23 字节 + 每任务约 25 字节，三个任务合计不到 100 字节，200 足够。
    仅当 configUSE_STATS_FORMATTING_FUNCTIONS 为 1 时才会用到。 */
 #define APP_TASK_STATS_BYTES 200U /*!< htTaskList() 的输出缓冲。 */
+/* 实时性仪表每 10 个日志周期（约 5 秒）报一次，够密到能看见抖动，又不至于把 9600 的
+   串口塞满。仅当 configUSE_LATENCY_STATS 为 1 时才会用到。 */
+#define APP_LATENCY_REPORT_EVERY 10U
 
 /** @brief 把毫秒换算成调度 tick，整数运算，不依赖 libm。 */
 #define APP_MS_TO_TICKS(ms) ((TickType_t)(((uint32_t)(ms) * (uint32_t)configTICK_RATE_HZ) / 1000U))
@@ -81,6 +85,11 @@ static TaskHandle_t s_monitor_task = NULL;
 
 /** 最近一次上电自检失败原因；粘滞不清，供日志任务与调试器读取。 */
 static volatile uint32_t s_last_error = APP_ERR_NONE;
+
+#if (configUSE_LATENCY_STATS == 1)
+/** 日志周期计数器，用来把实时性报告降频到每 10 个周期一次。 */
+static uint32_t s_latency_periods = 0U;
+#endif
 
 /* -------------------------------------------------------------------------- */
 /* 静态存储：三个任务的栈与控制块都在编译期落地，运行期一个字节都不向堆申请    */
@@ -222,6 +231,24 @@ static void prv_report_hex(const char *key, uint32_t value, const char *suffix)
 
 	board_console_write(line, (uint32_t)(cursor - line));
 }
+
+#if (configUSE_LATENCY_STATS == 1)
+/**
+ * @brief 把"总周期数 / 样本数"换算成平均微秒，样本数为 0 时返回 0。
+ *
+ * @param[in] ulTotalCycles 累计周期数。
+ * @param[in] ulCount       样本个数。
+ * @return 平均耗时，四舍五入到微秒。
+ */
+static uint32_t prv_average_us(uint32_t ulTotalCycles, uint32_t ulCount)
+{
+	if (ulCount == 0U) {
+		return 0U;
+	}
+
+	return htLatencyCyclesToUs(ulTotalCycles / ulCount);
+}
+#endif
 
 /* -------------------------------------------------------------------------- */
 /* 内核诊断出口：接管三个弱钩子，全部写 RS485 控制台                          */
@@ -385,6 +412,41 @@ static void prv_logger_task(void *param)
 
 		board_console_write(line, (uint32_t)(cursor - line));
 		(void)htWatchdogHeartbeat();
+
+#if (configUSE_LATENCY_STATS == 1)
+		/*
+		 * 实时性报告：临界区最长一段（含峰值调用点）与滴答中断最长一段。
+		 * over64 是"超过 64 微秒的临界区"次数——它直接对应中断响应被推迟的时长，
+		 * 健康系统里应该恒为 0。数字取自同一个快照，因此彼此自洽。
+		 */
+		s_latency_periods++;
+		if (s_latency_periods >= APP_LATENCY_REPORT_EVERY) {
+			htLatencySnapshot_t xSnapshot;
+
+			s_latency_periods = 0U;
+			htLatencyGetSnapshot(&xSnapshot);
+
+			cursor = line;
+			cursor = prv_str(cursor, "[lat] crit max=");
+			cursor = prv_u32(cursor, htLatencyCyclesToUs(xSnapshot.ulCriticalMaxCycles));
+			cursor = prv_str(cursor, "us caller=0x");
+			cursor = prv_hex(cursor, xSnapshot.ulCriticalCaller);
+			cursor = prv_str(cursor, "us avg=");
+			cursor = prv_u32(cursor, prv_average_us(xSnapshot.ulCriticalTotalCycles, xSnapshot.ulCriticalCount));
+			cursor = prv_str(cursor, "us n=");
+			cursor = prv_u32(cursor, xSnapshot.ulCriticalCount);
+			cursor = prv_str(cursor, " over64=");
+			cursor = prv_u32(cursor, xSnapshot.aulCriticalBuckets[HT_LATENCY_BUCKET_COUNT - 1U]);
+			cursor = prv_str(cursor, " tick max=");
+			cursor = prv_u32(cursor, htLatencyCyclesToUs(xSnapshot.ulTickMaxCycles));
+			cursor = prv_str(cursor, "us avg=");
+			cursor = prv_u32(cursor, prv_average_us(xSnapshot.ulTickTotalCycles, xSnapshot.ulTickCount));
+			cursor = prv_str(cursor, "us\r\n");
+
+			board_console_write(line, (uint32_t)(cursor - line));
+			(void)htWatchdogHeartbeat();
+		}
+#endif
 
 		htTaskDelay(APP_MS_TO_TICKS(APP_LOG_PERIOD_MS));
 	}
