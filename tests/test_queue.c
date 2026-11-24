@@ -778,6 +778,299 @@ static void test_delete_releases_dynamic_storage(void)
 	htSemaphoreDelete(NULL);
 	TEST_ASSERT(free_count == frees_before + 1U);
 }
+/* ------------------------------------------------------------------ */
+/* 4. 队列集                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief 集合只报告"哪个成员有数据"，数据本身留在成员里。
+ *
+ * 断言点：空集合立即返回 NULL；发送后 select 返回该成员；令牌取走后再次 select
+ * 仍返回 NULL（说明一次入队只产生一个令牌），而成员里的数据可以正常取出；
+ * 对普通队列调用 select 必须被拒绝，而不是把队列内容误当成成员句柄。
+ */
+static void test_queue_set_select_reports_the_member_holding_data(void)
+{
+	reset_test_state();
+	htQUEUE_t *set = htQueueSetCreate(4U);
+	htQUEUE_t *first = htQueueCreate(2U, sizeof(int));
+	htQUEUE_t *second = htQueueCreate(2U, sizeof(int));
+	int value = 7;
+	int received = 0;
+
+	TEST_ASSERT_NOT_NULL(set);
+	TEST_ASSERT_NOT_NULL(first);
+	TEST_ASSERT_NOT_NULL(second);
+	TEST_ASSERT_EQUAL(htPASS, htQueueAddToSet(first, set));
+	TEST_ASSERT_EQUAL(htPASS, htQueueAddToSet(second, set));
+
+	TEST_ASSERT_NULL(htQueueSelectFromSet(set, 0U));
+	TEST_ASSERT_EQUAL(htPASS, htQueueSend(first, &value, 0U));
+	TEST_ASSERT(first == htQueueSelectFromSet(set, 0U));
+	TEST_ASSERT_NULL(htQueueSelectFromSet(set, 0U));
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueReceive(first, &received, 0U));
+	TEST_ASSERT_EQUAL(value, received);
+
+	/* 普通队列没有集合标记，不能被当作集合使用。 */
+	TEST_ASSERT_NULL(htQueueSelectFromSet(second, 0U));
+	TEST_ASSERT_EQUAL(0U, uxCriticalNesting);
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueRemoveFromSet(first, set));
+	TEST_ASSERT_EQUAL(htPASS, htQueueRemoveFromSet(second, set));
+	htQueueDelete(set);
+	htQueueDelete(first);
+	htQueueDelete(second);
+}
+
+/**
+ * @brief 每成功入队一次就产生一个令牌，令牌数不会超过入队次数。
+ *
+ * 断言点：向长度为 2 的成员连发两条消息后可 select 两次，第三次返回 NULL；
+ * 两次接收顺序仍是 FIFO，证明 select 没有从成员里取走数据。
+ */
+static void test_queue_set_emits_one_token_per_sent_item(void)
+{
+	reset_test_state();
+	htQUEUE_t *set = htQueueSetCreate(4U);
+	htQUEUE_t *member = htQueueCreate(2U, sizeof(int));
+	int value = 1;
+	int received = 0;
+
+	TEST_ASSERT_NOT_NULL(set);
+	TEST_ASSERT_NOT_NULL(member);
+	TEST_ASSERT_EQUAL(htPASS, htQueueAddToSet(member, set));
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueSend(member, &value, 0U));
+	value = 2;
+	TEST_ASSERT_EQUAL(htPASS, htQueueSend(member, &value, 0U));
+
+	TEST_ASSERT(member == htQueueSelectFromSet(set, 0U));
+	TEST_ASSERT(member == htQueueSelectFromSet(set, 0U));
+	TEST_ASSERT_NULL(htQueueSelectFromSet(set, 0U));
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueReceive(member, &received, 0U));
+	TEST_ASSERT_EQUAL(1, received);
+	TEST_ASSERT_EQUAL(htPASS, htQueueReceive(member, &received, 0U));
+	TEST_ASSERT_EQUAL(2, received);
+	TEST_ASSERT_EQUAL(0U, uxCriticalNesting);
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueRemoveFromSet(member, set));
+	htQueueDelete(member);
+	htQueueDelete(set);
+}
+
+/**
+ * @brief 集合空时的有限等待会超时，并把任务重新挂回就绪链表。
+ *
+ * 断言点：select(..., 5) 返回 NULL 且节拍正好推进 5；任务回到 HT_TASK_READY，
+ * 事件项已摘链、状态项挂回 pxReadyTasksLists[1]，临界区计数归零。
+ */
+static void test_queue_set_select_times_out_and_relinks_task(void)
+{
+	reset_test_state();
+	htQUEUE_t *set = htQueueSetCreate(2U);
+	htQUEUE_t *member = htQueueCreate(2U, sizeof(int));
+	htTCB_t task = {0};
+
+	TEST_ASSERT_NOT_NULL(set);
+	TEST_ASSERT_NOT_NULL(member);
+	TEST_ASSERT_EQUAL(htPASS, htQueueAddToSet(member, set));
+
+	initialise_current_task(&task, 1U);
+	ticks_advanced_on_yield = 5U;
+	TEST_ASSERT_NULL(htQueueSelectFromSet(set, 5U));
+	TEST_ASSERT_EQUAL(5U, xTickCount);
+	TEST_ASSERT_EQUAL(HT_TASK_READY, task.uxTaskState);
+	TEST_ASSERT_NULL(task.xEventListItem.pxContainer);
+	TEST_ASSERT(task.xStateListItem.pxContainer == &pxReadyTasksLists[1]);
+	TEST_ASSERT_EQUAL(0U, uxCriticalNesting);
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueRemoveFromSet(member, set));
+	htQueueDelete(member);
+	htQueueDelete(set);
+}
+
+/**
+ * @brief 中断侧发送产生令牌，中断侧 select 能取到同一个成员。
+ *
+ * 断言点：发送成功且没有等待者时 pxHigherPriorityTaskWoken 保持 htFALSE；
+ * 令牌只产生一次；数据仍可正常接收。
+ */
+static void test_queue_set_from_isr_reports_the_member(void)
+{
+	reset_test_state();
+	htQUEUE_t *set = htQueueSetCreate(2U);
+	htQUEUE_t *member = htQueueCreate(2U, sizeof(int));
+	int value = 42;
+	int received = 0;
+	BaseType_t woken = htTRUE;
+
+	TEST_ASSERT_NOT_NULL(set);
+	TEST_ASSERT_NOT_NULL(member);
+	TEST_ASSERT_EQUAL(htPASS, htQueueAddToSet(member, set));
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueSendFromISR(member, &value, &woken));
+	TEST_ASSERT_EQUAL(htFALSE, woken);
+
+	TEST_ASSERT(member == htQueueSelectFromSetFromISR(set));
+	TEST_ASSERT_NULL(htQueueSelectFromSetFromISR(set));
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueReceiveFromISR(member, &received, NULL));
+	TEST_ASSERT_EQUAL(value, received);
+	TEST_ASSERT_EQUAL(0U, uxCriticalNesting);
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueRemoveFromSet(member, set));
+	htQueueDelete(member);
+	htQueueDelete(set);
+}
+
+/**
+ * @brief 非法成员一律拒绝，且失败路径不残留临界区。
+ *
+ * 断言点：NULL 成员、NULL 集合、自身、以集合为成员、已属其它集合、非空成员
+ * 全部返回 htFAIL；摘除非成员同样返回 htFAIL。
+ */
+static void test_queue_set_rejects_invalid_members(void)
+{
+	reset_test_state();
+	htQUEUE_t *set = htQueueSetCreate(4U);
+	htQUEUE_t *other_set = htQueueSetCreate(4U);
+	htQUEUE_t *member = htQueueCreate(2U, sizeof(int));
+	int value = 0;
+
+	TEST_ASSERT_NOT_NULL(set);
+	TEST_ASSERT_NOT_NULL(other_set);
+	TEST_ASSERT_NOT_NULL(member);
+
+	TEST_ASSERT_EQUAL(htFAIL, htQueueAddToSet(NULL, set));
+	TEST_ASSERT_EQUAL(htFAIL, htQueueAddToSet(member, NULL));
+	TEST_ASSERT_EQUAL(htFAIL, htQueueAddToSet(set, set));
+	TEST_ASSERT_EQUAL(htFAIL, htQueueAddToSet(set, other_set));
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueAddToSet(member, set));
+	TEST_ASSERT_EQUAL(htFAIL, htQueueAddToSet(member, other_set));
+	TEST_ASSERT_EQUAL(htFAIL, htQueueAddToSet(member, set));
+
+	TEST_ASSERT_EQUAL(htFAIL, htQueueRemoveFromSet(member, other_set));
+	TEST_ASSERT_EQUAL(htFAIL, htQueueRemoveFromSet(member, NULL));
+
+	/* 空成员才能加入：入队一次之后必须被拒绝。 */
+	TEST_ASSERT_EQUAL(htPASS, htQueueRemoveFromSet(member, set));
+	TEST_ASSERT_EQUAL(htPASS, htQueueSend(member, &value, 0U));
+	TEST_ASSERT_EQUAL(htFAIL, htQueueAddToSet(member, set));
+	TEST_ASSERT_EQUAL(0U, uxCriticalNesting);
+
+	htQueueDelete(member);
+	htQueueDelete(set);
+	htQueueDelete(other_set);
+}
+
+/**
+ * @brief 仍在集合里的成员、还有成员的集合都拒绝删除。
+ *
+ * 断言点：两次拒绝删除时释放次数不变且句柄仍可用；摘除后删除恢复正常的释放行为。
+ */
+static void test_queue_set_refuses_to_delete_live_participants(void)
+{
+	reset_test_state();
+	htQUEUE_t *set = htQueueSetCreate(4U);
+	htQUEUE_t *member = htQueueCreate(2U, sizeof(int));
+	size_t frees_before;
+
+	TEST_ASSERT_NOT_NULL(set);
+	TEST_ASSERT_NOT_NULL(member);
+	TEST_ASSERT_EQUAL(htPASS, htQueueAddToSet(member, set));
+
+	frees_before = free_count;
+	htQueueDelete(member);
+	TEST_ASSERT_EQUAL(frees_before, free_count);
+	TEST_ASSERT_EQUAL(2U, member->uxLength);
+
+	htQueueDelete(set);
+	TEST_ASSERT_EQUAL(frees_before, free_count);
+	TEST_ASSERT_EQUAL(4U, set->uxLength);
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueRemoveFromSet(member, set));
+	htQueueDelete(member);
+	TEST_ASSERT(free_count > frees_before);
+
+	frees_before = free_count;
+	htQueueDelete(set);
+	TEST_ASSERT(free_count > frees_before);
+	TEST_ASSERT_EQUAL(0U, uxCriticalNesting);
+}
+
+/**
+ * @brief 信号量可以作为集合成员：give 产生令牌，take 之后令牌不再重复。
+ *
+ * @note 信号量的 give 内部走 htQueueSend()，因此令牌生成路径与队列完全相同；
+ *       这条用例把这个耦合固化为契约。
+ */
+static void test_queue_set_accepts_a_semaphore_member(void)
+{
+	reset_test_state();
+	htQUEUE_t *set = htQueueSetCreate(2U);
+	SemaphoreHandle_t semaphore = htSemaphoreCreateBinary();
+
+	TEST_ASSERT_NOT_NULL(set);
+	TEST_ASSERT_NOT_NULL(semaphore);
+	TEST_ASSERT_EQUAL(htPASS, htQueueAddToSet(semaphore, set));
+	TEST_ASSERT_NULL(htQueueSelectFromSet(set, 0U));
+
+	TEST_ASSERT_EQUAL(htPASS, htSemaphoreGive(semaphore));
+	TEST_ASSERT(semaphore == htQueueSelectFromSet(set, 0U));
+	TEST_ASSERT_EQUAL(htPASS, htSemaphoreTake(semaphore, 0U));
+	TEST_ASSERT_NULL(htQueueSelectFromSet(set, 0U));
+	TEST_ASSERT_EQUAL(0U, uxCriticalNesting);
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueRemoveFromSet(semaphore, set));
+	htSemaphoreDelete(semaphore);
+	htQueueDelete(set);
+}
+
+/**
+ * @brief 静态创建的集合与成员完全不碰堆，删除时也不释放调用方内存。
+ *
+ * 断言点：创建、加入、入队、select、接收全程 allocation_count 保持 0；
+ * 删除前后 free_count 不变（静态对象只清字段）；容量为 0 时返回 NULL。
+ * @note 纯静态固件（configTOTAL_HEAP_SIZE == 0）里这是队列集唯一可用的创建方式。
+ */
+static void test_queue_set_static_create_uses_caller_memory(void)
+{
+	reset_test_state();
+	htQUEUE_t set_buffer = {0};
+	uint8_t set_storage[4U * sizeof(QueueSetMemberHandle_t)];
+	htQUEUE_t member_buffer = {0};
+	uint8_t member_storage[2U * sizeof(int)];
+	QueueSetHandle_t set;
+	QueueHandle_t member;
+	int value = 5;
+	int received = 0;
+	size_t frees_before;
+
+	set = htQueueSetCreateStatic(4U, set_storage, &set_buffer);
+	member = htQueueCreateStatic(2U, sizeof(int), member_storage, &member_buffer);
+	TEST_ASSERT_NOT_NULL(set);
+	TEST_ASSERT_NOT_NULL(member);
+	TEST_ASSERT_EQUAL(0U, allocation_count);
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueAddToSet(member, set));
+	TEST_ASSERT_EQUAL(htPASS, htQueueSend(member, &value, 0U));
+	TEST_ASSERT(member == htQueueSelectFromSet(set, 0U));
+	TEST_ASSERT_EQUAL(htPASS, htQueueReceive(member, &received, 0U));
+	TEST_ASSERT_EQUAL(value, received);
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueRemoveFromSet(member, set));
+	frees_before = free_count;
+	htQueueDelete(member);
+	htQueueDelete(set);
+	TEST_ASSERT_EQUAL(frees_before, free_count);
+	TEST_ASSERT_EQUAL(0U, uxCriticalNesting);
+
+	TEST_ASSERT_NULL(htQueueSetCreateStatic(0U, set_storage, &set_buffer));
+}
+
 /**
  * @brief 运行本套件的全部用例并返回失败计数。
  *
@@ -808,5 +1101,13 @@ int main(void)
 	RUN_TEST(test_queue_isr_receive_wakes_a_higher_priority_sender);
 	RUN_TEST(test_queue_reset_and_peek_keep_the_queue_consistent);
 	RUN_TEST(test_delete_releases_dynamic_storage);
+	RUN_TEST(test_queue_set_select_reports_the_member_holding_data);
+	RUN_TEST(test_queue_set_emits_one_token_per_sent_item);
+	RUN_TEST(test_queue_set_select_times_out_and_relinks_task);
+	RUN_TEST(test_queue_set_from_isr_reports_the_member);
+	RUN_TEST(test_queue_set_rejects_invalid_members);
+	RUN_TEST(test_queue_set_refuses_to_delete_live_participants);
+	RUN_TEST(test_queue_set_accepts_a_semaphore_member);
+	RUN_TEST(test_queue_set_static_create_uses_caller_memory);
 	return UnityEnd();
 }
