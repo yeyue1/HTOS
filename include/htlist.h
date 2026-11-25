@@ -159,6 +159,17 @@ htListItem_t *htListGetNext(htListItem_t *pxItem);
 UBaseType_t htListGetCurrentNumberOfItems(htList_t *pxList);
 
 /**
+ * @brief 取链表尾哨兵的地址标记，用于遍历终止比较。
+ *
+ * @param[in] pxList 目标链表。
+ * @return 与表尾元素 pxNext 相等的哨兵地址；仅用于地址比较，不得作为完整 htListItem_t 解引用。
+ */
+static inline htListItem_t *htListGetEndMarker(htList_t *pxList)
+{
+	return (htListItem_t *)(void *)&(pxList->xListEnd);
+}
+
+/**
  * @brief 取链表的项数，语义与 htListGetCurrentNumberOfItems() 相同。
  *
  * @param[in] pxList 目标链表。

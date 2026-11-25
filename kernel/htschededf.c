@@ -12,15 +12,9 @@
 #include "htschedpolicy.h"
 #include "htscheduler.h"
 #include "htlist.h"
+#include "htkernel_internal.h"
 
 #if (configUSE_SCHED_POLICY_EDF == 1)
-
-/** 各优先级的就绪链表。 */
-extern htList_t pxReadyTasksLists[];
-/** 当前运行的任务。 */
-extern htTCB_t *pxCurrentTCB;
-/** 系统滴答计数。 */
-extern TickType_t xTickCount;
 
 /** 累计漏期次数，只为诊断服务。 */
 static volatile uint32_t s_ulDeadlineMisses = 0U;
@@ -35,16 +29,11 @@ static void prvEdfInitTask(htTCB_t *pxTask)
 {
 	if (pxTask != NULL) {
 		pxTask->ulDeadline = HT_SCHED_NO_DEADLINE;
+		pxTask->ucHasDeadline = 0U;
 		pxTask->ucDeadlineMissed = 0U;
 	}
 }
 
-/**
- * @brief 策略重新接管任务时的复位：保留已登记的死期，只清掉漏期记账。
- *
- * @note 死期是调用方通过 htSchedSetDeadline() 设置的任务参数，热切换时必须保留；
- *       "这个死期是否已经记过漏期"是策略自己的记账，重新接管后从零开始。
- */
 static void prvEdfResetTask(htTCB_t *pxTask)
 {
 	if (pxTask != NULL) {
@@ -52,9 +41,6 @@ static void prvEdfResetTask(htTCB_t *pxTask)
 	}
 }
 
-/**
- * @brief 策略初始化：清空漏期计数，让已有任务按当前死期重新接受监督。
- */
 static void prvEdfInitialise(void)
 {
 	UBaseType_t uxCount = htListGetCurrentNumberOfItems(&pxAllocatedTasksList);
@@ -69,13 +55,11 @@ static void prvEdfInitialise(void)
 }
 
 /**
- * @brief 选择死期最近的就绪任务。
+ * @brief 无副作用扫描最高优先级就绪链表中死期最近的任务。
  *
- * @note 只考察最高优先级的就绪链表：优先级仍是硬边界，EDF 只在同一档内排序。
- *       这一档里没有登记死期的任务时，退化为固定优先级选择（合成复用默认策略），
- *       保证空闲任务等普通任务仍然能被选中。
+ * @return 找到的带死期任务；若该档无带死期任务返回 NULL。
  */
-static htTCB_t *prvEdfSelectNext(void)
+static htTCB_t *prvEdfFindBestDeadlineTask(void)
 {
 	UBaseType_t uxPriority = htSchedGetTopReadyPriority();
 	htList_t *pxList = &(pxReadyTasksLists[uxPriority]);
@@ -85,16 +69,21 @@ static htTCB_t *prvEdfSelectNext(void)
 
 	for (UBaseType_t uxIndex = 0U; (uxIndex < uxCount) && (pxItem != NULL); uxIndex++) {
 		htTCB_t *pxTask = (htTCB_t *)htListGetItemOwner(pxItem);
-		if (pxTask != NULL && pxTask->ulDeadline != HT_SCHED_NO_DEADLINE) {
-			if (pxBest == NULL || (int32_t)(pxTask->ulDeadline - pxBest->ulDeadline) < 0) {
-				pxBest = pxTask;
-			} else if (pxTask->ulDeadline == pxBest->ulDeadline && pxTask == pxCurrentTCB) {
-				/* 死期相同优先保持当前任务，避免两个同死期任务每 tick 互踢。 */
+		if (pxTask != NULL && pxTask->ucHasDeadline != 0U) {
+			if (pxBest == NULL || (int32_t)(pxTask->ulDeadline - pxBest->ulDeadline) < 0 ||
+					(pxTask->ulDeadline == pxBest->ulDeadline && pxTask == pxCurrentTCB)) {
 				pxBest = pxTask;
 			}
 		}
 		pxItem = htListGetNext(pxItem);
 	}
+
+	return pxBest;
+}
+
+static htTCB_t *prvEdfSelectNext(void)
+{
+	htTCB_t *pxBest = prvEdfFindBestDeadlineTask();
 
 	if (pxBest == NULL) {
 		pxBest = htSchedPolicyFixedPriority.pxSelectNext();
@@ -104,16 +93,21 @@ static htTCB_t *prvEdfSelectNext(void)
 }
 
 /**
- * @brief 抢占判断：死期最近的就绪任务不是当前任务时切换。
+ * @brief 无副作用抢占判断：绝不推进固定优先级轮转指针 pxIndex。
  */
 static BaseType_t prvEdfShouldPreempt(htTCB_t *pxCurrent)
 {
 	BaseType_t xSwitchRequired = htFALSE;
 
 #if (configUSE_PREEMPTION == 1)
-	htTCB_t *pxBest = prvEdfSelectNext();
-	if (pxBest != NULL && pxBest != pxCurrent) {
-		xSwitchRequired = htTRUE;
+	htTCB_t *pxBest = prvEdfFindBestDeadlineTask();
+	if (pxBest != NULL) {
+		if (pxBest != pxCurrent) {
+			xSwitchRequired = htTRUE;
+		}
+	} else {
+		/* 最高优先级档没有带死期任务时，走无副作用的固定优先级抢占判定，防止双倍推进 pxIndex。 */
+		xSwitchRequired = htSchedPolicyFixedPriority.xShouldPreempt(pxCurrent);
 	}
 #else
 	(void)pxCurrent;
@@ -122,26 +116,40 @@ static BaseType_t prvEdfShouldPreempt(htTCB_t *pxCurrent)
 	return xSwitchRequired;
 }
 
-/**
- * @brief 滴答记账：检查当前任务是否已经跑过自己的死期。
- */
-static void prvEdfTick(htTCB_t *pxCurrent)
+static void prvEdfCheckTaskMiss(htTCB_t *pxTask)
 {
-	if (pxCurrent == NULL || pxCurrent->ulDeadline == HT_SCHED_NO_DEADLINE) {
-		return;
-	}
-
-	if ((int32_t)(pxCurrent->ulDeadline - xTickCount) < 0 && pxCurrent->ucDeadlineMissed == 0U) {
-		pxCurrent->ucDeadlineMissed = 1U;
+	if (pxTask != NULL && pxTask->ucHasDeadline != 0U && pxTask->ucDeadlineMissed == 0U &&
+			(int32_t)(pxTask->ulDeadline - xTickCount) < 0) {
+		pxTask->ucDeadlineMissed = 1U;
 		s_ulDeadlineMisses++;
 	}
 }
 
 /**
- * @brief 设置任务死期；传 HT_SCHED_NO_DEADLINE 表示取消。
+ * @brief 滴答记账：检查当前任务以及所有就绪态带死期任务是否错过死期。
  */
-BaseType_t htSchedSetDeadline(TaskHandle_t xTask, TickType_t xDeadline)
+static void prvEdfTick(htTCB_t *pxCurrent)
 {
+	UBaseType_t uxCount = htListGetCurrentNumberOfItems(&pxAllocatedTasksList);
+	htListItem_t *pxItem = htListGetHead(&pxAllocatedTasksList);
+
+	for (UBaseType_t uxIndex = 0U; (uxIndex < uxCount) && (pxItem != NULL); uxIndex++) {
+		htTCB_t *pxTask = (htTCB_t *)htListGetItemOwner(pxItem);
+		if (pxTask != NULL && (pxTask == pxCurrent || pxTask->uxTaskState == HT_TASK_READY ||
+									  pxTask->uxTaskState == HT_TASK_RUNNING)) {
+			prvEdfCheckTaskMiss(pxTask);
+		}
+		pxItem = htListGetNext(pxItem);
+	}
+
+	/* 兜底：若调用方测试未将 pxCurrent 挂进 pxAllocatedTasksList，仍确保检查它。 */
+	prvEdfCheckTaskMiss(pxCurrent);
+}
+
+static BaseType_t prvEdfUpdateDeadline(TaskHandle_t xTask, TickType_t xDeadline, uint8_t ucHasDeadline)
+{
+	BaseType_t xYieldRequired = htFALSE;
+
 	if (xTask == NULL) {
 		return htFAIL;
 	}
@@ -150,10 +158,33 @@ BaseType_t htSchedSetDeadline(TaskHandle_t xTask, TickType_t xDeadline)
 
 	htEnterCritical();
 	pxTask->ulDeadline = xDeadline;
+	pxTask->ucHasDeadline = ucHasDeadline;
 	pxTask->ucDeadlineMissed = 0U;
+	if (htSchedulerIsStarted() == htTRUE && htSchedGetPolicy() == &htSchedPolicyEdf &&
+			prvEdfShouldPreempt(pxCurrentTCB) == htTRUE) {
+		xYieldRequired = htTRUE;
+	}
 	htExitCritical();
 
+	if (xYieldRequired == htTRUE) {
+		htTaskYield();
+	}
 	return htPASS;
+}
+
+BaseType_t htSchedClearDeadline(TaskHandle_t xTask)
+{
+	return prvEdfUpdateDeadline(xTask, HT_SCHED_NO_DEADLINE, 0U);
+}
+
+BaseType_t htSchedSetDeadline(TaskHandle_t xTask, TickType_t xDeadline)
+{
+	return prvEdfUpdateDeadline(xTask, xDeadline, (xDeadline == HT_SCHED_NO_DEADLINE) ? 0U : 1U);
+}
+
+BaseType_t htSchedSetDeadlineAbsolute(TaskHandle_t xTask, TickType_t xDeadline)
+{
+	return prvEdfUpdateDeadline(xTask, xDeadline, 1U);
 }
 
 uint32_t htSchedEdfGetDeadlineMisses(void)
@@ -176,6 +207,7 @@ const htSchedPolicy_t htSchedPolicyEdf = {
 		prvEdfTick, /* vTick */
 		prvEdfSelectNext, /* pxSelectNext */
 		prvEdfShouldPreempt, /* xShouldPreempt */
+		NULL, /* vTaskEnqueued */
 };
 
 #endif /* configUSE_SCHED_POLICY_EDF */

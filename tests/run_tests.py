@@ -24,9 +24,18 @@ TEST_SPECS = {
     },
     "test_mem.out": {"sources": ["test_mem.c", "unity.c", "../kernel/htmem.c"]},
     "test_task.out": {
-        "sources": ["test_task.c", "unity.c", "../kernel/httask.c", "../kernel/htlist.c", "../kernel/htschedpolicy.c"],
+        "sources": [
+            "test_task.c",
+            "unity.c",
+            "../kernel/httask.c",
+            "../kernel/htlist.c",
+            "../kernel/htutils.c",
+            "../kernel/htschedpolicy.c",
+            "stubs/host_cmsis.c",
+        ],
         "extra_flags": [
             "-DHTOS_HOST_TEST",
+            "-DconfigUSE_STATS_FORMATTING_FUNCTIONS=1",
             "-Wno-pointer-to-int-cast",
             "-Wno-int-to-pointer-cast",
             "-Istubs",
@@ -64,6 +73,61 @@ TEST_SPECS = {
             "-DconfigUSE_SCHED_POLICY_EDF=1",
         ],
     },
+    "test_scheduler.out": {
+        "sources": [
+            "test_scheduler.c",
+            "unity.c",
+            "../kernel/htscheduler.c",
+            "../kernel/htos.c",
+            "../kernel/httask.c",
+            "../kernel/htlist.c",
+            "../kernel/htutils.c",
+            "../kernel/htschedpolicy.c",
+            "../kernel/htqueue.c",
+            "../kernel/htsemaphore.c",
+            "../kernel/htmem.c",
+            "stubs/host_cmsis.c",
+        ],
+        "extra_flags": [
+            "-DHTOS_HOST_TEST",
+            "-Wno-pointer-to-int-cast",
+            "-Wno-int-to-pointer-cast",
+            "-Istubs",
+        ],
+    },
+    "test_timer.out": {
+        "sources": [
+            "test_timer.c",
+            "unity.c",
+            "../kernel/httimer.c",
+            "../kernel/htqueue.c",
+            "../kernel/htlist.c",
+        ],
+        "extra_flags": [
+            "-DconfigUSE_TIMERS=1",
+        ],
+    },
+    "test_eventgroup.out": {
+        "sources": [
+            "test_eventgroup.c",
+            "unity.c",
+            "../kernel/hteventgroup.c",
+            "../kernel/htlist.c",
+        ],
+        "extra_flags": [
+            "-DconfigUSE_EVENT_GROUPS=1",
+        ],
+    },
+    "test_pool.out": {
+        "sources": [
+            "test_pool.c",
+            "unity.c",
+            "../kernel/htpool.c",
+        ],
+        "extra_flags": [
+            "-DconfigUSE_BLOCK_POOL=1",
+        ],
+    },
 }
 
 
@@ -89,6 +153,8 @@ def build_tests(compiler: str) -> int:
             *spec.get("extra_flags", []),
             "-I.",
             "-I../include",
+            "-I../portable/Host",
+            "-Istubs",
             "-o",
             target,
             *spec["sources"],

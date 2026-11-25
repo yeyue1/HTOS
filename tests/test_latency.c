@@ -91,7 +91,7 @@ static void test_latency_single_critical_section(void)
 
 	TEST_ASSERT_EQUAL(1U, xSnapshot.ulCriticalCount);
 	TEST_ASSERT_EQUAL((5U * TEST_CYCLES_PER_US), xSnapshot.ulCriticalMaxCycles);
-	TEST_ASSERT_EQUAL((5U * TEST_CYCLES_PER_US), xSnapshot.ulCriticalTotalCycles);
+	TEST_ASSERT_EQUAL((5U * TEST_CYCLES_PER_US), xSnapshot.ullCriticalTotalCycles);
 	TEST_ASSERT_EQUAL(0x08001234UL, xSnapshot.ulCriticalCaller);
 	TEST_ASSERT_EQUAL(0U, xSnapshot.aulCriticalBuckets[2]); /* <= 4 us */
 	TEST_ASSERT_EQUAL(1U, xSnapshot.aulCriticalBuckets[3]); /* <= 8 us */
@@ -140,7 +140,7 @@ static void test_latency_peak_keeps_its_call_site(void)
 	TEST_ASSERT_EQUAL(3U, xSnapshot.ulCriticalCount);
 	TEST_ASSERT_EQUAL((20U * TEST_CYCLES_PER_US), xSnapshot.ulCriticalMaxCycles);
 	TEST_ASSERT_EQUAL(0x2000U, xSnapshot.ulCriticalCaller);
-	TEST_ASSERT_EQUAL((25U * TEST_CYCLES_PER_US), xSnapshot.ulCriticalTotalCycles);
+	TEST_ASSERT_EQUAL((25U * TEST_CYCLES_PER_US), xSnapshot.ullCriticalTotalCycles);
 }
 
 /**
@@ -179,7 +179,7 @@ static void test_latency_tick_window(void)
 	htLatencyGetSnapshot(&xSnapshot);
 	TEST_ASSERT_EQUAL(2U, xSnapshot.ulTickCount);
 	TEST_ASSERT_EQUAL((3U * TEST_CYCLES_PER_US), xSnapshot.ulTickMaxCycles);
-	TEST_ASSERT_EQUAL((4U * TEST_CYCLES_PER_US), xSnapshot.ulTickTotalCycles);
+	TEST_ASSERT_EQUAL((4U * TEST_CYCLES_PER_US), xSnapshot.ullTickTotalCycles);
 }
 
 /**
@@ -222,6 +222,23 @@ static void test_latency_cycles_to_us_rounds(void)
 	TEST_ASSERT_EQUAL(2U, htLatencyCyclesToUs(TEST_CYCLES_PER_US + (TEST_CYCLES_PER_US / 2U)));
 }
 
+/** @brief P0 回归：累计周期为 64 位，跨 UINT32_MAX 不溢出。 */
+static void test_latency_64bit_totals_do_not_overflow(void)
+{
+	htLatencySnapshot_t xSnapshot;
+
+	htLatencyInit();
+	for (uint32_t i = 0U; i < 3U; i++) {
+		htHostDwt.CYCCNT = 0U;
+		htLatencyTickBegin();
+		htHostDwt.CYCCNT = 0x80000000U;
+		htLatencyTickEnd();
+	}
+	htLatencyGetSnapshot(&xSnapshot);
+	TEST_ASSERT_EQUAL(3U, xSnapshot.ulTickCount);
+	TEST_ASSERT(xSnapshot.ullTickTotalCycles == (3ULL * 0x80000000ULL));
+}
+
 int main(void)
 {
 	UnityBegin("test_latency.c");
@@ -245,6 +262,8 @@ int main(void)
 	RUN_TEST(test_latency_snapshot_null_is_ignored);
 	setup();
 	RUN_TEST(test_latency_cycles_to_us_rounds);
+	setup();
+	RUN_TEST(test_latency_64bit_totals_do_not_overflow);
 
 	return UnityEnd();
 }

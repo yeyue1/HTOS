@@ -38,11 +38,11 @@
 #define TLSF_FL_INDEX_MAX 14
 /** @brief 二级索引个数，恒为 16。 */
 #define TLSF_SL_INDEX_COUNT (1 << TLSF_SL_INDEX_COUNT_LOG2)
-/** @brief 一级索引位移，值为 8，即小块与大块的阈值是 2^8 = 256 字节。 */
+/** @brief 一级索引位移，值为 7（4 + 3），对应小块上限 2^7 = 128 字节（每档步长 8 字节）。 */
 #define TLSF_FL_INDEX_SHIFT (TLSF_SL_INDEX_COUNT_LOG2 + 3)
-/** @brief 一级索引数量，由二级索引位移与一级上限共同决定。 */
+/** @brief 一级索引数量（14 - 7 + 1 = 8 档，总槽位 8 × 16 = 128 条链表）。 */
 #define TLSF_FL_INDEX_COUNT (TLSF_FL_INDEX_MAX - TLSF_FL_INDEX_SHIFT + 1)
-/** @brief 小块上限，256 字节；不超过该值的块走线性查找。 */
+/** @brief 小块上限，128 字节；小于该值的块归入 FL=0 按 8 字节步长线性分档。 */
 #define TLSF_SMALL_BLOCK_SIZE (1 << TLSF_FL_INDEX_SHIFT)
 
 /* ------------------------------------------------------------------ */
@@ -50,12 +50,9 @@
 /* ------------------------------------------------------------------ */
 
 /**
- * @brief 块对齐粒度，等于指针大小。
- *
- * ARM Cortex-M 要求 32 位数据四字节对齐，所有分配块都按该值向上对齐，
- * 32 位平台上即为 4 字节。
+ * @brief 块对齐粒度：8 字节对齐，满足 ARM AAPCS（64 位数据与双字栈对齐）要求。
  */
-#define TLSF_ALIGN_SIZE (sizeof(void *))
+#define TLSF_ALIGN_SIZE ((size_t)8U)
 
 /* ------------------------------------------------------------------ */
 /* 3. 块状态位                                                          */
@@ -67,9 +64,9 @@
  * - bit 1：物理上前一个块是否空闲（用于释放时的合并判断）。
  */
 /** @brief 当前块空闲标志（bit 0）。 */
-#define TLSF_BLOCK_CURR_FREE (1 << 0)
+#define TLSF_BLOCK_CURR_FREE ((size_t)1U << 0U)
 /** @brief 物理上前一块空闲标志（bit 1）。 */
-#define TLSF_BLOCK_PREV_FREE (1 << 1)
+#define TLSF_BLOCK_PREV_FREE ((size_t)1U << 1U)
 /** @brief 大小掩码，屏蔽低两位状态后得到纯块大小。 */
 #define TLSF_SIZE_MASK (~(TLSF_BLOCK_CURR_FREE | TLSF_BLOCK_PREV_FREE))
 
@@ -78,30 +75,32 @@
 /* ------------------------------------------------------------------ */
 
 /**
- * @brief TLSF 内存块头，紧跟用户数据区之前。
+ * @brief TLSF 内存块头：空闲链表指针与已分配块的用户数据区复用同一片地址。
  *
- * 每个块（空闲或已分配）都带此头。布局要点：
- * 1. prev_phys_block：物理相邻前块的指针，用于释放时向前合并；
- * 2. size：块大小与状态位打包，可快速取大小、查状态；
- * 3. next_free / prev_free：仅空闲块使用，串成双向空闲链表。
+ * 布局要点：
+ * 1. prev_phys_block + size：已分配块与空闲块常驻开销（32 位下仅 8 字节）；
+ * 2. next_free / prev_free：仅在块处于空闲态时有效，已分配时作为用户负载起点，
+ *    将单块固定开销从 16 字节减半为 8 字节。
  *
- * 内存布局：[块头][用户数据][下一个块头]...
+ * 已分配内存布局：[prev_phys_block | size][用户数据区（从 next_free 偏移开始）]...
  */
 typedef struct block_header {
 	struct block_header *prev_phys_block; /**< 物理上前一个块，用于合并相邻空闲块 */
 	size_t size; /**< 块大小，低两位为状态标志 */
 
-	/* 以下两个字段仅在块空闲时有效，用于构成空闲链表 */
+	/* 以下两个字段仅在块空闲时有效；块已分配时由用户数据区复用 */
 	struct block_header *next_free; /**< 空闲链表中下一个块 */
 	struct block_header *prev_free; /**< 空闲链表中上一个块 */
 } block_header_t;
 
-/** @brief 块头字节数。 */
-#define TLSF_BLOCK_HEADER_SIZE (sizeof(block_header_t))
-/** @brief 用户数据相对块头的偏移，等于块头大小。 */
-#define TLSF_BLOCK_START_OFFSET (sizeof(block_header_t))
-/** @brief 堆管理额外开销，为堆首、堆尾两个块头之和。 */
-#define TLSF_POOL_OVERHEAD (2 * TLSF_BLOCK_HEADER_SIZE)
+/** @brief 用户数据相对块头的偏移（与已分配块固定开销相等，32 位下 8 字节，64 位下 16 字节）。 */
+#define TLSF_BLOCK_START_OFFSET (offsetof(block_header_t, next_free))
+/** @brief 已分配块固定块头开销字节数。 */
+#define TLSF_BLOCK_HEADER_SIZE (TLSF_BLOCK_START_OFFSET)
+/** @brief 任意有效块的最小总字节数（必须容纳完整空闲链表指针）。 */
+#define TLSF_MIN_BLOCK_SIZE (sizeof(block_header_t))
+/** @brief 堆管理额外开销（首块头 + 尾哨兵头）。 */
+#define TLSF_POOL_OVERHEAD (2U * TLSF_BLOCK_HEADER_SIZE)
 
 /* ------------------------------------------------------------------ */
 /* 5. 控制结构                                                          */
@@ -153,6 +152,19 @@ void htMemInit(void);
  *       可在任意上下文调用。size 为 0 或请求超出可用空间时返回 NULL。
  */
 void *htPortMalloc(size_t size);
+
+#if (configUSE_MALLOC_FAILED_HOOK == 1)
+/**
+ * @brief 内存分配失败钩子。
+ *
+ * @param[in] xWantedSize 本次申请失败的字节数。
+ *
+ * @note 弱符号，默认空实现。每次 htPortMalloc() 因为堆里没有足够大的块而返回
+ *       NULL 时调用一次；请求长度为 0 或长度溢出算调用错误，不触发。
+ * @note 在临界区之外调用，可以安全地做串口输出等动作。
+ */
+void htMallocFailedHook(size_t xWantedSize);
+#endif
 
 /**
  * @brief 释放此前由 htPortMalloc() 分配的块。

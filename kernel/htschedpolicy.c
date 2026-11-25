@@ -9,33 +9,47 @@
 #include "htschedpolicy.h"
 #include "htscheduler.h"
 #include "htlist.h"
+#include "htPort.h"
+#include "htkernel_internal.h"
 
-/** 各优先级的就绪链表，下标即优先级。 */
-extern htList_t pxReadyTasksLists[];
-/** 当前运行的任务。 */
-extern htTCB_t *pxCurrentTCB;
+_Static_assert((configMAX_PRIORITIES > 0) && (configMAX_PRIORITIES <= 32),
+		"O(1) ready priority bitmap requires 1 <= configMAX_PRIORITIES <= 32");
+
+/** @brief 32 位就绪优先级位图：bit p 为 1 表示 pxReadyTasksLists[p] 非空。 */
+static uint32_t s_ulReadyPrioritiesBitmap = 0U;
 
 /** @brief 当前生效的策略对象；默认固定优先级，启动前可整体替换。 */
 static const htSchedPolicy_t *pxSchedulerPolicy = &htSchedPolicyFixedPriority;
 
+void htSchedRecordReadyPriority(UBaseType_t uxPriority)
+{
+	if (uxPriority < (UBaseType_t)configMAX_PRIORITIES) {
+		s_ulReadyPrioritiesBitmap |= (1UL << (uint32_t)uxPriority);
+	}
+}
+
+void htSchedClearReadyPriorityIfEmpty(UBaseType_t uxPriority)
+{
+	if (uxPriority < (UBaseType_t)configMAX_PRIORITIES &&
+			htListGetCurrentNumberOfItems(&(pxReadyTasksLists[uxPriority])) == 0U) {
+		s_ulReadyPrioritiesBitmap &= ~(1UL << (uint32_t)uxPriority);
+	}
+}
+
+void htSchedResetReadyBitmap(void)
+{
+	s_ulReadyPrioritiesBitmap = 0U;
+}
+
 /**
- * @brief 找最高优先级的非空就绪链表。
- *
- * @note 循环上限 32 只是防御：链表被踩坏时不至于死循环在调度器里。
+ * @brief O(1) 查找最高非空就绪优先级（Cortex-M3 单周期 CLZ 指令）。
  */
 UBaseType_t htSchedGetTopReadyPriority(void)
 {
-	UBaseType_t uxTopPriority = 0U;
-	uint32_t ulSafetyCounter = 0U;
-
-	for (uxTopPriority = configMAX_PRIORITIES - 1U; uxTopPriority > 0U && ulSafetyCounter < 32U; uxTopPriority--) {
-		ulSafetyCounter++;
-		if (htListGetCurrentNumberOfItems(&(pxReadyTasksLists[uxTopPriority])) > 0U) {
-			break;
-		}
+	if (s_ulReadyPrioritiesBitmap == 0U) {
+		return 0U;
 	}
-
-	return uxTopPriority;
+	return (UBaseType_t)(31U - htPortCountLeadingZeros(s_ulReadyPrioritiesBitmap));
 }
 
 /**
@@ -44,15 +58,20 @@ UBaseType_t htSchedGetTopReadyPriority(void)
 static htTCB_t *prvFixedSelectNext(void)
 {
 	htList_t *pxList = &(pxReadyTasksLists[htSchedGetTopReadyPriority()]);
+	htListItem_t *const pxEnd = htListGetEndMarker(pxList);
 
-	/* 从当前索引向后轮转，跳过列表尾哨兵。 */
-	htListItem_t *pxNextTCB = htListGetNext(pxList->pxIndex);
-	if (pxNextTCB == &(pxList->xListEnd)) {
-		pxNextTCB = htListGetNext(pxNextTCB);
+	if (htListGetCurrentNumberOfItems(pxList) == 0U) {
+		return NULL;
+	}
+
+	/* 从当前索引向后轮转，严禁经由 htListItem_t* 解引用精简哨兵。 */
+	htListItem_t *pxNextTCB = (pxList->pxIndex == pxEnd) ? pxList->xListEnd.pxNext : htListGetNext(pxList->pxIndex);
+	if (pxNextTCB == pxEnd) {
+		pxNextTCB = pxList->xListEnd.pxNext;
 	}
 
 	/* 推进轮转索引，使同优先级任务下次从下一个开始。 */
-	if (pxNextTCB != NULL) {
+	if (pxNextTCB != NULL && pxNextTCB != pxEnd) {
 		pxList->pxIndex = pxNextTCB;
 
 		/* 从链表项取回 TCB；属主非法时返回 NULL，让调用方保持原任务。 */
@@ -71,23 +90,15 @@ static BaseType_t prvFixedShouldPreempt(htTCB_t *pxCurrent)
 
 #if (configUSE_PREEMPTION == 1)
 	if (pxCurrent != NULL) {
-		UBaseType_t uxCurrentPriority = pxCurrent->uxPriority;
+		const UBaseType_t uxCurrentPriority = pxCurrent->uxPriority;
 
-		/* 有更高优先级任务就绪就需要切换。 */
-		for (UBaseType_t uxPriority = configMAX_PRIORITIES - 1U; uxPriority > uxCurrentPriority; uxPriority--) {
-			if (htListGetCurrentNumberOfItems(&(pxReadyTasksLists[uxPriority])) > 0U) {
-				xSwitchRequired = htTRUE;
-				break;
-			}
+		/* O(1) 位图查询：有更高优先级任务就绪即切换。 */
+		if (htSchedGetTopReadyPriority() > uxCurrentPriority) {
+			xSwitchRequired = htTRUE;
 		}
 
 #if (configUSE_TIME_SLICING == 1)
-		/*
-		 * 时间片轮转：同优先级存在兄弟任务时同样要请求切换。
-		 *
-		 * 只判断"更高优先级"会让同优先级的多任务退化为严格先来先服务——先创建的
-		 * 那个除非自己阻塞，否则后创建者永远拿不到 CPU。
-		 */
+		/* 时间片轮转：同优先级存在兄弟任务时同样请求切换。 */
 		if (xSwitchRequired == htFALSE && htListGetCurrentNumberOfItems(&(pxReadyTasksLists[uxCurrentPriority])) > 1U) {
 			xSwitchRequired = htTRUE;
 		}
@@ -108,6 +119,7 @@ const htSchedPolicy_t htSchedPolicyFixedPriority = {
 		NULL, /* vTick：时间片由抢占判断负责，无需记账 */
 		prvFixedSelectNext, /* pxSelectNext */
 		prvFixedShouldPreempt, /* xShouldPreempt */
+		NULL, /* vTaskEnqueued：无需唤醒记账 */
 };
 
 /**
@@ -184,5 +196,12 @@ void htSchedNotifyTick(htTCB_t *pxCurrent)
 {
 	if (pxSchedulerPolicy->vTick != NULL) {
 		pxSchedulerPolicy->vTick(pxCurrent);
+	}
+}
+
+void htSchedNotifyTaskEnqueued(htTCB_t *pxTask)
+{
+	if (pxTask != NULL && pxSchedulerPolicy->vTaskEnqueued != NULL) {
+		pxSchedulerPolicy->vTaskEnqueued(pxTask);
 	}
 }

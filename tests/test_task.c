@@ -25,8 +25,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core_cm3.h" /* 主机侧桩：提供 DWT->CYCCNT，用来构造可控的时间差 */
 #include "htlist.h"
+#include "htschedpolicy.h"
 #include "httask.h"
+#include "htutils.h"
+#include "htkernel_internal.h"
 
 /* ------------------------------------------------------------------ */
 /* 1. 测试状态与计数器                                                */
@@ -34,6 +38,12 @@
 
 /** 临界区嵌套计数：内核每次进出临界区都必须配对，用例末尾断言它回到 0。 */
 static UBaseType_t critical_nesting;
+/** ISR 临界区嵌套计数，验证 FromISR 接口配对保护。 */
+static UBaseType_t isr_critical_nesting;
+/** 可控的调度器启动标志，便于验证运行期建任务抢占。 */
+static BaseType_t scheduler_started;
+/** 调度器挂起嵌套计数，用于验证 htTaskList() 走挂起调度器而非全程关中断。 */
+static UBaseType_t scheduler_suspend_nesting;
 /** 让出钩子被调用的次数：断言某条路径 "没有触发调度" 时就靠它为 0。 */
 static UBaseType_t yield_count;
 /** 累计释放次数；删除类用例用它精确断言释放了几块内存。 */
@@ -77,11 +87,6 @@ void htStackOverflowHook(TaskHandle_t xTask, const char *pcTaskName)
 /* ------------------------------------------------------------------ */
 /* 2. 内核依赖桩函数                                                  */
 /* ------------------------------------------------------------------ */
-
-/** @brief 内核内部函数（httask.c 静态函数的外露版本），把就绪/延时/分配链表恢复成初态。 */
-extern void prvInitialiseTaskLists(void);
-/** @brief 内核内部的延时链表处理；测试手动推进 xTickCount 后调用它模拟节拍中断。 */
-extern void htTaskCheckDelayedTasks(void);
 
 /**
  * @brief 替换内核的动态分配：统计次数后转发给 malloc()。
@@ -132,26 +137,40 @@ void htExitCritical(void)
 	}
 }
 
-/**
- * @brief 恒返回 htFALSE：主机侧不做抢占式切换。
- *
- * @return 固定为 htFALSE。
- * @note 需要观测 "是否要求切走" 的用例改为断言 yield_count，
- *        因此本桩故意不记录任何状态。
- */
+UBaseType_t htEnterCriticalFromISR(void)
+{
+	isr_critical_nesting++;
+	return isr_critical_nesting;
+}
+
+void htExitCriticalFromISR(UBaseType_t uxSavedInterruptStatus)
+{
+	(void)uxSavedInterruptStatus;
+	if (isr_critical_nesting > 0U) {
+		isr_critical_nesting--;
+	}
+}
+
 BaseType_t htSchedulerNeedsSwitch(void)
 {
 	return htFALSE;
 }
 
-/**
- * @brief 恒返回 htFALSE：主机侧从不启动调度器，策略替换始终被允许。
- *
- * @return 固定为 htFALSE。
- */
 BaseType_t htSchedulerIsStarted(void)
 {
-	return htFALSE;
+	return scheduler_started;
+}
+
+void htSuspendScheduler(void)
+{
+	scheduler_suspend_nesting++;
+}
+
+void htResumeScheduler(void)
+{
+	if (scheduler_suspend_nesting > 0U) {
+		scheduler_suspend_nesting--;
+	}
 }
 
 /** @brief 空实现：主机侧没有启动汇编，仅用于满足链接。 */
@@ -194,6 +213,9 @@ static void reset_test_state(void)
 	uxCurrentNumberOfTasks = 0U;
 	xTickCount = 0U;
 	critical_nesting = 0U;
+	isr_critical_nesting = 0U;
+	scheduler_started = htFALSE;
+	scheduler_suspend_nesting = 0U;
 	yield_count = 0U;
 	free_count = 0U;
 	allocation_count = 0U;
@@ -240,6 +262,7 @@ static void initialise_task(htTCB_t *task, const char *name, UBaseType_t priorit
 	memcpy(task->pcTaskName, name, name_length);
 	task->pcTaskName[name_length] = '\0';
 	htListInsertEnd(&(pxReadyTasksLists[priority]), &(task->xStateListItem));
+	htSchedRecordReadyPriority(priority);
 	htListInsertEnd(&pxAllocatedTasksList, &(task->xAllListItem));
 }
 
@@ -768,17 +791,168 @@ static void test_notify_actions_set_bits_increment_and_overwrite(void)
 
 	TEST_ASSERT_EQUAL(0, critical_nesting);
 }
+
 /* ------------------------------------------------------------------ */
-/* 7. 测试入口                                                        */
+/* 7. 运行时间统计                                                     */
 /* ------------------------------------------------------------------ */
 
 /**
- * @brief 运行本套件的全部用例并返回失败数。
+ * @brief 一次样本都没有时，三个统计接口必须返回 0 而不是 100。
  *
- * @return UnityEnd() 的结果，即失败的用例数，0 表示全部通过。
- * @note 新增用例必须同时在这里登记 RUN_TEST()，否则不会被运行；
- *       栈哨兵用例的登记要放在同一个 #if 内，保证未开启检查时可编译。
+ * 断言意图：0 表示「没有数据」。若在无样本时返回 100% 空闲或 0% 使用率，
+ * 上层会把「还没开始统计」误读成真实负载，因此把这个契约锁死。
+ * @note 本用例必须排在累积用例前面：它依赖计数仍为 0。
  */
+static void test_runtime_stats_report_no_data_as_zero(void)
+{
+	reset_test_state();
+	TEST_ASSERT_EQUAL(0, htGetIdleRunTimePercent());
+	TEST_ASSERT_EQUAL(0, htGetCPUUsage());
+	TEST_ASSERT_EQUAL(0, htGetRunTimeCounter());
+}
+
+/**
+ * @brief 两次采样之间只把增量记入统计，且回绕时用无符号减法得到正确差值。
+ *
+ * 断言意图：主机侧把 CYCCNT 当成普通内存，直接写值就能构造出确定的周期增量，
+ * 因而可以脱离真实时钟验证「只有增量被累加」和「计数器回绕不算负数」。
+ */
+static void test_runtime_stats_accumulate_only_the_delta(void)
+{
+	uint64_t mark;
+
+	reset_test_state();
+
+	/* 先把基准钉在 0：若此前已有基准，这次采样增量为 0，不会污染结果。 */
+	DWT->CYCCNT = 0U;
+	htRunTimeSample();
+	mark = htGetRunTimeCounter();
+
+	/* 走 5000 个周期后采样，总量应恰好增加 5000。 */
+	DWT->CYCCNT = 5000U;
+	htRunTimeSample();
+	TEST_ASSERT_EQUAL(5000, (int)(uint32_t)(htGetRunTimeCounter() - mark));
+
+	/* 计数器回绕：从 UINT32_MAX 再走 1000 个周期，无符号减法仍得到正的 1000。 */
+	DWT->CYCCNT = 0xFFFFFFFFU;
+	htRunTimeSample();
+	mark = htGetRunTimeCounter();
+	DWT->CYCCNT = 999U; /* 0xFFFFFFFF + 1000 回绕后等于 999 */
+	htRunTimeSample();
+	TEST_ASSERT_EQUAL(1000, (int)(uint32_t)(htGetRunTimeCounter() - mark));
+}
+
+/* ------------------------------------------------------------------ */
+/* 8. 任务表格式化                                                     */
+/* ------------------------------------------------------------------ */
+
+#if (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
+/**
+ * @brief 任务表为每个任务写一行，内容含名字与状态字母。
+ *
+ * 断言意图：接口不经过 printf，只能靠输出内容验证；这里同时锁住「两个任务都在表里」
+ * 与「整表以换行结尾」，因为上层通常是整块丢给串口。
+ */
+static void test_task_list_writes_one_line_per_task(void)
+{
+	htTCB_t alpha;
+	htTCB_t beta;
+	char buffer[128];
+	size_t used;
+	size_t length;
+
+	reset_test_state();
+	initialise_task(&alpha, "alpha", 2U);
+	initialise_task(&beta, "beta", 1U);
+	alpha.ullRunTimeCounter = 25U;
+	beta.ullRunTimeCounter = 75U;
+
+	used = htTaskList(buffer, sizeof(buffer));
+	length = strlen(buffer);
+	TEST_ASSERT(used > 0U);
+	TEST_ASSERT_EQUAL((int)length, (int)used);
+	TEST_ASSERT(strstr(buffer, "alpha") != NULL);
+	TEST_ASSERT(strstr(buffer, "beta") != NULL);
+	TEST_ASSERT_EQUAL('\n', (int)buffer[length - 1U]);
+	TEST_ASSERT_EQUAL(0, critical_nesting);
+}
+
+/**
+ * @brief 缓冲区不足时按容量截断，且末尾始终留一个结束符。
+ *
+ * 断言意图：这是无 printf 手写拼接最容易出错的地方——越界一格就会踩坏调用方栈，
+ * 因此固定「容量 N 最多写 N-1 个字符 + '\0'」这一条契约。
+ * 另外验证空指针与非法的过小容量返回 0 而不是崩溃。
+ */
+static void test_task_list_truncates_without_overflow(void)
+{
+	htTCB_t alpha;
+	char small[16];
+	size_t used;
+	size_t index;
+
+	reset_test_state();
+	initialise_task(&alpha, "alpha", 2U);
+
+	memset(small, 'x', sizeof(small));
+	used = htTaskList(small, sizeof(small));
+	TEST_ASSERT_EQUAL((int)(sizeof(small) - 1U), (int)used);
+	TEST_ASSERT_EQUAL('\0', (int)small[sizeof(small) - 1U]);
+	for (index = 0U; index < used; index++) {
+		TEST_ASSERT(small[index] != 'x');
+	}
+	TEST_ASSERT_EQUAL(0, critical_nesting);
+
+	TEST_ASSERT_EQUAL(0, (int)htTaskList(NULL, 32U));
+	TEST_ASSERT_EQUAL(0, (int)htTaskList(small, 1U));
+}
+
+/**
+ * @brief P0 回归：64 位任务运行周期计数跨越 59.6 s（UINT32_MAX）不回绕，且运行期创建高优任务立即抢占。
+ */
+static void test_runtime_create_yields_and_64bit_counter_no_wrap(void)
+{
+	static StackType_t high_stack[configMINIMAL_STACK_SIZE];
+	static htTCB_t high_tcb;
+	htTCB_t low_tcb;
+	char buffer[160];
+
+	reset_test_state();
+	initialise_task(&low_tcb, "low", 1U);
+	pxCurrentTCB = &low_tcb;
+	scheduler_started = htTRUE;
+	yield_count = 0U;
+
+	TaskHandle_t high =
+			htTaskCreateStatic(dummy_task, "high", configMINIMAL_STACK_SIZE, NULL, 3U, high_stack, &high_tcb);
+	TEST_ASSERT_NOT_NULL(high);
+	TEST_ASSERT_EQUAL(1U, yield_count);
+
+	/* 累加超过 UINT32_MAX 周期，验证单任务计数不截断。 */
+	DWT->CYCCNT = 0U;
+	htRunTimeSample();
+	DWT->CYCCNT = 0x80000000U;
+	htRunTimeSample();
+	DWT->CYCCNT = 0U;
+	htRunTimeSample();
+	DWT->CYCCNT = 0x80000000U;
+	htRunTimeSample();
+	TEST_ASSERT(low_tcb.ullRunTimeCounter > (uint64_t)UINT32_MAX);
+
+	TEST_ASSERT(htTaskList(buffer, sizeof(buffer)) > 0U);
+	TEST_ASSERT(strstr(buffer, "low") != NULL);
+
+	/* 重复删除同一个已摘除的静态任务不得二次递减 uxCurrentNumberOfTasks。 */
+	const UBaseType_t uxBeforeDelete = uxCurrentNumberOfTasks;
+	htTaskDelete(high);
+	TEST_ASSERT_EQUAL((int)(uxBeforeDelete - 1U), (int)uxCurrentNumberOfTasks);
+	htTaskDelete(high);
+	TEST_ASSERT_EQUAL((int)(uxBeforeDelete - 1U), (int)uxCurrentNumberOfTasks);
+	TEST_ASSERT_EQUAL(0U, critical_nesting);
+	TEST_ASSERT_EQUAL(0U, isr_critical_nesting);
+}
+#endif
+
 int main(void)
 {
 	UnityBegin("test_task.c");
@@ -802,5 +976,12 @@ int main(void)
 	RUN_TEST(test_stack_sentinel_skips_tasks_without_usable_storage);
 #endif
 	RUN_TEST(test_notify_actions_set_bits_increment_and_overwrite);
+	RUN_TEST(test_runtime_stats_report_no_data_as_zero);
+	RUN_TEST(test_runtime_stats_accumulate_only_the_delta);
+#if (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
+	RUN_TEST(test_task_list_writes_one_line_per_task);
+	RUN_TEST(test_task_list_truncates_without_overflow);
+	RUN_TEST(test_runtime_create_yields_and_64bit_counter_no_wrap);
+#endif
 	return UnityEnd();
 }

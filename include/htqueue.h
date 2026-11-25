@@ -22,32 +22,23 @@ typedef struct htQueuePointers {
 	int8_t *pcReadFrom; /**< 指向下一个待读取位置 */
 } htQueuePointers_t;
 
+#if (configUSE_RECURSIVE_MUTEXES == 1)
 /**
- * @brief 计数信号量数据，只在信号量（uxItemSize == 0）时有效。
- */
-typedef struct htSemaphoreData {
-	UBaseType_t uxSemaphoreCount; /**< 当前信号量计数值 */
-} htSemaphoreData_t;
-
-/**
- * @brief 递归互斥量的持有者信息。
- *
- * 递归互斥量把这块结构当作"数据项"存放在队列存储区里，
- * 记录谁持有、递归了几层、以及为了优先级继承而临时提升前的原始优先级。
+ * @brief 递归互斥量的持有者信息，直接内嵌于控制块 union 中。
  */
 typedef struct htMutexHolder {
 	htTCB_t *xTaskHandle; /**< 当前持有该互斥量的任务 */
 	UBaseType_t uxRecursiveCallCount; /**< 递归获取次数，归零才真正释放 */
-	/* 用于优先级继承：临时提升前的原始优先级 */
 	UBaseType_t uxOriginalPriority; /**< 未被继承时的原始优先级 */
 } htMutexHolder_t;
+#endif
 
 /**
  * @brief 队列控制块。
  *
  * 数据队列与信号量共用同一套结构，靠 uxItemSize 区分：
  * - uxItemSize > 0：使用 u.xQueue 的读写指针搬运数据；
- * - uxItemSize == 0：使用 u.xSemaphore 的计数值，只做同步。
+ * - uxItemSize == 0：直接用 uxMessagesWaiting 记录信号量计数，递归互斥量使用 u.xMutex。
  */
 typedef struct htQueueDefinition {
 	int8_t *pcHead; /**< 指向队列存储区起始位置 */
@@ -55,7 +46,9 @@ typedef struct htQueueDefinition {
 
 	union {
 		htQueuePointers_t xQueue; /**< 队列特有的读写指针 */
-		htSemaphoreData_t xSemaphore; /**< 信号量特有的计数值 */
+#if (configUSE_RECURSIVE_MUTEXES == 1)
+		htMutexHolder_t xMutex; /**< 递归互斥量内嵌的持有者与继承状态 */
+#endif
 	} u;
 
 	htList_t xTasksWaitingToSend; /**< 因队列满而等待发送的任务链表 */
@@ -63,11 +56,10 @@ typedef struct htQueueDefinition {
 
 	volatile UBaseType_t uxMessagesWaiting; /**< 当前队列中已有消息数（信号量为计数值） */
 	UBaseType_t uxLength; /**< 队列容量，即可容纳的项目数 */
-	UBaseType_t uxItemSize; /**< 每项字节数，为 0 表示这是信号量 */
+	UBaseType_t uxItemSize; /**< 每项字节数，为 0 表示这是信号量或互斥量 */
 
-	volatile int8_t cRxLock; /**< 接收方向的队列锁，与 cTxLock 配合批量唤醒 */
-	volatile int8_t cTxLock; /**< 发送方向的队列锁，与 cRxLock 配合批量唤醒 */
 	uint8_t ucStaticallyAllocated; /**< 非 0 表示控制块与存储区由调用方提供，删除时不释放 */
+	uint8_t ucQueueType; /**< 队列子类型（htQUEUE_TYPE_*） */
 
 #if (configUSE_QUEUE_SETS == 1)
 	/**
@@ -86,15 +78,6 @@ typedef struct htQueueDefinition {
 
 /** @brief 队列句柄。 */
 typedef htQUEUE_t *QueueHandle_t;
-
-/* ------------------------------------------------------------------ */
-/* 队列锁取值                                                           */
-/* ------------------------------------------------------------------ */
-
-/** @brief 队列未被锁住（默认值）。 */
-#define htQUEUE_UNLOCKED ((int8_t)(-1))
-/** @brief 队列已被锁住，期间不立即唤醒等待任务，解锁时统一唤醒。 */
-#define htQUEUE_LOCKED ((int8_t)(0))
 
 /* ------------------------------------------------------------------ */
 /* 队列创建与删除                                                       */

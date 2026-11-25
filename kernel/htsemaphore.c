@@ -15,48 +15,43 @@
 #include "htmem.h"
 #include "htqueue.h"
 #include "htscheduler.h"
+#include "htschedpolicy.h"
 #include "httask.h"
+#include "htkernel_internal.h"
+
+#if (configUSE_RECURSIVE_MUTEXES == 1)
 
 /** 持有者 uxOriginalPriority 的哨兵值：表示该持有者当前没有被继承提升过优先级。 */
 #define htMUTEX_NO_INHERITED_PRIORITY UINT32_MAX
 
 /**
  * @brief 把任务的优先级改成指定值，并同步修好它在就绪链表和事件链表中的位置。
- *
- * @param[in] pxTask 目标任务；为 NULL 或目标优先级越界（>= configMAX_PRIORITIES）时直接返回。
- * @param[in] uxPriority 新的优先级。
- *
- * 步骤：
- * 1. 任务处于 READY/RUNNING 时先把它从就绪链表摘下，事件表项也从所在事件链表摘下；
- * 2. 更新 uxPriority，并把两个表项的排序键改成 configMAX_PRIORITIES - uxPriority
- *    （htListInsert() 按值升序插入，键越小越靠前，所以高优先级任务的键更小）；
- * 3. 恢复挂载：就绪任务挂到新优先级就绪链表的尾部，仍在等待事件的任务挂回原事件链表。
- *
- * @note 必须在内核临界区内调用；中途被中断打断会让任务短暂同时挂在两个链表上。
- * @note 就绪链表用 htListInsertEnd() 而不是按值插入，是为了让同优先级任务保持
- *       “先来先跑”，改优先级不会打乱时间片轮转的顺序。
- * @note 事件链表指针取自 xEventListItem.pxContainer，摘链前先保存，摘链后仍可回溯。
  */
 static void prvMoveReadyTaskToPriority(htTCB_t *pxTask, UBaseType_t uxPriority)
 {
 	if (pxTask == NULL || uxPriority >= configMAX_PRIORITIES) {
 		return;
 	}
-	htList_t *pxEventList = (htList_t *)pxTask->xEventListItem.pxContainer;
+	const UBaseType_t uxOldPriority = pxTask->uxPriority;
+	htList_t *pxEventList = pxTask->xEventListItem.pxContainer;
 	const BaseType_t xTaskIsReady =
 			pxTask->uxTaskState == HT_TASK_READY || pxTask->uxTaskState == HT_TASK_RUNNING ? htTRUE : htFALSE;
 	if (xTaskIsReady == htTRUE) {
 		htListRemove(&(pxTask->xStateListItem));
+		htSchedClearReadyPriorityIfEmpty(uxOldPriority);
 	}
 	if (pxEventList != NULL) {
 		htListRemove(&(pxTask->xEventListItem));
 	}
-	pxTask->uxPriority = uxPriority;
+	pxTask->uxPriority = (uint8_t)uxPriority;
+#if (configUSE_TRACE_FACILITY == 1)
 	htListSetItemValue(&(pxTask->xAllListItem), configMAX_PRIORITIES - uxPriority);
+#endif
 	htListSetItemValue(&(pxTask->xEventListItem), configMAX_PRIORITIES - uxPriority);
 	if (xTaskIsReady == htTRUE) {
 		htListSetItemValue(&(pxTask->xStateListItem), configMAX_PRIORITIES - uxPriority);
 		htListInsertEnd(&(pxReadyTasksLists[uxPriority]), &(pxTask->xStateListItem));
+		htSchedRecordReadyPriority(uxPriority);
 	}
 	if (pxEventList != NULL) {
 		htListInsert(pxEventList, &(pxTask->xEventListItem));
@@ -114,77 +109,86 @@ static void prvInheritMutexOwnerPriority(htMutexHolder_t *pxMutexHolder)
 }
 
 /**
- * @brief 递归互斥量超时退出前的收尾：撤销本次等待期间施加的优先级继承。
+ * @brief 递归互斥量超时退出前的收尾：按剩余最高优先级等待者重新计算或撤销优先级继承。
  *
- * @param[in] xSemaphore 递归互斥量句柄。
- * @param[in] pxQueue 该句柄对应的队列控制块，调用者已经转换好，避免重复强转。
- * @return htPASS 已完成收尾；htFAIL 表示当前不应或无法撤销（还有等待者、队列为空）。
- *
- * 等待者在 htSemaphoreTakeRecursive() 中阻塞时，持有者记录是放回队列里的；
- * 如果最终因超时返回失败，这次等待期间施加的优先级提升必须撤回，否则持有者会永远
- * 停在被抬高的优先级上（优先级继承“泄漏”，会干扰后续的调度公平性）。
- *
- * @note 仅当 xTasksWaitingToReceive 为空时才撤销：还有任务在等这把锁说明锁仍被争用，
- *       保留提升可以避免下一次竞争重新出现优先级反转窗口。
- * @note 撤销方式为“取出记录 - 恢复原优先级 - 再放回”，记录本身的所有权语义不变，
- *       也不会把锁从持有者手里抢走。
- * @note 返回值只做诊断用，调用方无论如何都会返回 htFAIL。
+ * @param[in,out] pxQueue 递归互斥量控制块，调用方已持有内核临界区。
  */
-static BaseType_t prvRestoreRecursiveMutexAfterTimeout(QueueHandle_t xSemaphore, htQUEUE_t *pxQueue)
+static void prvDisinheritRecursiveMutexAfterTimeout(htQUEUE_t *pxQueue)
 {
-	htMutexHolder_t xMutexHolder;
+	htMutexHolder_t *pxHolder;
+	htListItem_t *pxHead;
 
-	if (pxQueue == NULL || pxQueue->xTasksWaitingToReceive.uxNumberOfItems != 0U) {
-		return htFAIL;
+	if (pxQueue == NULL || pxQueue->ucQueueType != htQUEUE_TYPE_RECURSIVE_MUTEX) {
+		return;
 	}
-	if (htQueueReceive(xSemaphore, &xMutexHolder, 0U) != htPASS) {
-		return htFAIL;
+	pxHolder = &(pxQueue->u.xMutex);
+	if (pxHolder->xTaskHandle == NULL || pxHolder->uxOriginalPriority == htMUTEX_NO_INHERITED_PRIORITY) {
+		return;
 	}
 
-	prvRestoreMutexOwnerPriority(&xMutexHolder);
-	(void)htQueueSend(xSemaphore, &xMutexHolder, 0U);
-	return htPASS;
+	pxHead = htListGetHead(&(pxQueue->xTasksWaitingToReceive));
+	if (pxHead == NULL) {
+		prvRestoreMutexOwnerPriority(pxHolder);
+		return;
+	}
+
+	/* 仍有其他等待者：将持有者降到 max(原始优先级, 剩余最高等待者优先级)。 */
+	htTCB_t *pxTopWaiter = (htTCB_t *)htListGetItemOwner(pxHead);
+	UBaseType_t uxTargetPriority = pxHolder->uxOriginalPriority;
+	if (pxTopWaiter != NULL && pxTopWaiter->uxPriority > uxTargetPriority) {
+		uxTargetPriority = pxTopWaiter->uxPriority;
+	}
+	if (pxHolder->xTaskHandle->uxPriority != uxTargetPriority) {
+		prvMoveReadyTaskToPriority(pxHolder->xTaskHandle, uxTargetPriority);
+	}
+	if (uxTargetPriority == pxHolder->uxOriginalPriority) {
+		pxHolder->uxOriginalPriority = htMUTEX_NO_INHERITED_PRIORITY;
+	}
 }
 
 /**
- * @brief 创建二值信号量。
- *
- * 内部创建一个长度为 1、项大小为 0 的队列：项大小为 0 时队列只维护计数、不拷贝数据。
- *
- * @return 信号量句柄；内存不足时返回 NULL。
- * @note 初始计数为 0（不可用），需要先释放一次才能获取成功。
+ * @brief 从递归互斥量等待链表唤醒优先级最高的等待者（调用方需持有临界区）。
  */
-SemaphoreHandle_t htSemaphoreCreateBinary(void)
+static htTCB_t *prvUnblockMutexWaiter(htList_t *pxEventList)
 {
-	return htQueueCreate(1U, 0U);
+	htListItem_t *pxItem = htListGetHead(pxEventList);
+	if (pxItem == NULL) {
+		return NULL;
+	}
+
+	htTCB_t *pxTCB = (htTCB_t *)htListGetItemOwner(pxItem);
+	htListRemove(pxItem);
+	if (pxTCB == NULL || pxTCB->uxPriority >= configMAX_PRIORITIES) {
+		return NULL;
+	}
+
+	htListRemove(&(pxTCB->xStateListItem));
+	htListSetItemValue(&(pxTCB->xStateListItem), configMAX_PRIORITIES - pxTCB->uxPriority);
+	pxTCB->uxTaskState = HT_TASK_READY;
+	htListInsertEnd(&(pxReadyTasksLists[pxTCB->uxPriority]), &(pxTCB->xStateListItem));
+	htSchedRecordReadyPriority(pxTCB->uxPriority);
+	htSchedNotifyTaskEnqueued(pxTCB);
+	return pxTCB;
 }
 
 /**
- * @brief 静态创建二值信号量，控制块由调用者提供。
- *
- * @param[in] pxQueueBuffer 调用者提供的队列控制块存储，通常为 static 变量。
- * @return 信号量句柄；参数非法、空间不足或未启用 configSUPPORT_STATIC_ALLOCATION 时返回 NULL。
- * @note 项大小为 0，不需要额外的消息存储区，一个 htQUEUE_t 就够。
- * @warning pxQueueBuffer 的生命周期必须覆盖信号量的整个使用期，不能是任务栈上的局部变量。
+ * @brief 初始化递归互斥量控制块的内嵌锁字段。
  */
-SemaphoreHandle_t htSemaphoreCreateBinaryStatic(htQUEUE_t *pxQueueBuffer)
+static void prvInitRecursiveMutexFields(htQUEUE_t *pxQueue)
 {
-	return htQueueCreateStatic(1U, 0U, NULL, pxQueueBuffer);
+	pxQueue->ucQueueType = htQUEUE_TYPE_RECURSIVE_MUTEX;
+	pxQueue->uxMessagesWaiting = 1U;
+	pxQueue->u.xMutex.xTaskHandle = NULL;
+	pxQueue->u.xMutex.uxRecursiveCallCount = 0U;
+	pxQueue->u.xMutex.uxOriginalPriority = htMUTEX_NO_INHERITED_PRIORITY;
 }
+#endif /* configUSE_RECURSIVE_MUTEXES */
 
-/**
- * @brief 创建计数信号量。
- *
- * @param[in] uxMaxCount 计数上限，同时决定队列长度。
- * @param[in] uxInitialCount 初始计数，必须不大于 uxMaxCount。
- * @return 信号量句柄；uxMaxCount 为 0、初始计数越界或内存不足时返回 NULL。
- * @note 队列创建时计数为 0，这里再把 uxSemaphoreCount 与 uxMessagesWaiting 一起改成
- *       uxInitialCount；两个字段必须保持一致，前者给上层查询，后者是队列逻辑判断依据。
- */
-SemaphoreHandle_t htSemaphoreCreateCounting(UBaseType_t uxMaxCount, UBaseType_t uxInitialCount)
+#if (configUSE_COUNTING_SEMAPHORES == 1) || (configUSE_MUTEXES == 1)
+static SemaphoreHandle_t prvCreateSemaphoreWithInitialCount(
+		UBaseType_t uxMaxCount, UBaseType_t uxInitialCount, uint8_t ucQueueType)
 {
 	QueueHandle_t xSemaphore;
-	htQUEUE_t *pxQueue;
 
 	if (uxMaxCount == 0U || uxInitialCount > uxMaxCount) {
 		return NULL;
@@ -192,61 +196,109 @@ SemaphoreHandle_t htSemaphoreCreateCounting(UBaseType_t uxMaxCount, UBaseType_t 
 
 	xSemaphore = htQueueCreate(uxMaxCount, 0U);
 	if (xSemaphore != NULL) {
-		pxQueue = (htQUEUE_t *)xSemaphore;
-		pxQueue->u.xSemaphore.uxSemaphoreCount = uxInitialCount;
+		htQUEUE_t *pxQueue = (htQUEUE_t *)xSemaphore;
 		pxQueue->uxMessagesWaiting = uxInitialCount;
+		pxQueue->ucQueueType = ucQueueType;
 	}
 	return xSemaphore;
 }
 
-/**
- * @brief 静态创建计数信号量，控制块由调用者提供。
- *
- * @param[in] uxMaxCount 计数上限。
- * @param[in] uxInitialCount 初始计数，必须不大于 uxMaxCount。
- * @param[in] pxQueueBuffer 调用者提供的队列控制块存储。
- * @return 信号量句柄；参数非法、控制块为空或静态分配未启用时返回 NULL。
- * @note 与动态版本一样，创建后会把两个计数字段一起改成 uxInitialCount。
- * @warning pxQueueBuffer 必须是长生命周期的静态存储，不能放在任务栈上。
- */
-SemaphoreHandle_t htSemaphoreCreateCountingStatic(
-		UBaseType_t uxMaxCount, UBaseType_t uxInitialCount, htQUEUE_t *pxQueueBuffer)
+static SemaphoreHandle_t prvCreateSemaphoreWithInitialCountStatic(
+		UBaseType_t uxMaxCount, UBaseType_t uxInitialCount, uint8_t ucQueueType, htQUEUE_t *pxQueueBuffer)
 {
+	QueueHandle_t xSemaphore;
+
 	if (pxQueueBuffer == NULL || uxMaxCount == 0U || uxInitialCount > uxMaxCount) {
 		return NULL;
 	}
 
-	QueueHandle_t xSemaphore = htQueueCreateStatic(uxMaxCount, 0U, NULL, pxQueueBuffer);
+	xSemaphore = htQueueCreateStatic(uxMaxCount, 0U, NULL, pxQueueBuffer);
 	if (xSemaphore != NULL) {
-		pxQueueBuffer->u.xSemaphore.uxSemaphoreCount = uxInitialCount;
 		pxQueueBuffer->uxMessagesWaiting = uxInitialCount;
+		pxQueueBuffer->ucQueueType = ucQueueType;
+	}
+	return xSemaphore;
+}
+#endif /* configUSE_COUNTING_SEMAPHORES || configUSE_MUTEXES */
+
+/**
+ * @brief 创建二值信号量。
+ */
+SemaphoreHandle_t htSemaphoreCreateBinary(void)
+{
+	QueueHandle_t xSemaphore = htQueueCreate(1U, 0U);
+	if (xSemaphore != NULL) {
+		((htQUEUE_t *)xSemaphore)->ucQueueType = htQUEUE_TYPE_BINARY_SEMAPHORE;
 	}
 	return xSemaphore;
 }
 
 /**
+ * @brief 静态创建二值信号量，控制块由调用者提供。
+ */
+SemaphoreHandle_t htSemaphoreCreateBinaryStatic(htQUEUE_t *pxQueueBuffer)
+{
+	QueueHandle_t xSemaphore = htQueueCreateStatic(1U, 0U, NULL, pxQueueBuffer);
+	if (xSemaphore != NULL) {
+		pxQueueBuffer->ucQueueType = htQUEUE_TYPE_BINARY_SEMAPHORE;
+	}
+	return xSemaphore;
+}
+
+/**
+ * @brief 创建计数信号量。
+ */
+SemaphoreHandle_t htSemaphoreCreateCounting(UBaseType_t uxMaxCount, UBaseType_t uxInitialCount)
+{
+#if (configUSE_COUNTING_SEMAPHORES == 1)
+	return prvCreateSemaphoreWithInitialCount(uxMaxCount, uxInitialCount, htQUEUE_TYPE_COUNTING_SEMAPHORE);
+#else
+	(void)uxMaxCount;
+	(void)uxInitialCount;
+	return NULL;
+#endif
+}
+
+/**
+ * @brief 静态创建计数信号量，控制块由调用者提供。
+ */
+SemaphoreHandle_t htSemaphoreCreateCountingStatic(
+		UBaseType_t uxMaxCount, UBaseType_t uxInitialCount, htQUEUE_t *pxQueueBuffer)
+{
+#if (configUSE_COUNTING_SEMAPHORES == 1)
+	return prvCreateSemaphoreWithInitialCountStatic(
+			uxMaxCount, uxInitialCount, htQUEUE_TYPE_COUNTING_SEMAPHORE, pxQueueBuffer);
+#else
+	(void)uxMaxCount;
+	(void)uxInitialCount;
+	(void)pxQueueBuffer;
+	return NULL;
+#endif
+}
+
+/**
  * @brief 创建互斥量。
- *
- * @return 互斥量句柄；内存不足时返回 NULL。
- * @note 等价于“计数上限 1、初始计数 1”的计数信号量，创建后即为未上锁状态。
- * @note 没有持有者记录，因此不校验谁获取谁释放，也不支持递归获取和优先级继承；
- *       需要递归语义请使用 htSemaphoreCreateRecursiveMutex()。
  */
 SemaphoreHandle_t htSemaphoreCreateMutex(void)
 {
-	return htSemaphoreCreateCounting(1U, 1U);
+#if (configUSE_MUTEXES == 1)
+	return prvCreateSemaphoreWithInitialCount(1U, 1U, htQUEUE_TYPE_MUTEX);
+#else
+	return NULL;
+#endif
 }
 
 /**
  * @brief 静态创建互斥量，控制块由调用者提供。
- *
- * @param[in] pxQueueBuffer 调用者提供的队列控制块存储。
- * @return 互斥量句柄；参数非法或静态分配未启用时返回 NULL。
- * @note 语义与 htSemaphoreCreateMutex() 相同，只是控制块来自调用者。
  */
 SemaphoreHandle_t htSemaphoreCreateMutexStatic(htQUEUE_t *pxQueueBuffer)
 {
-	return htSemaphoreCreateCountingStatic(1U, 1U, pxQueueBuffer);
+#if (configUSE_MUTEXES == 1)
+	return prvCreateSemaphoreWithInitialCountStatic(1U, 1U, htQUEUE_TYPE_MUTEX, pxQueueBuffer);
+#else
+	(void)pxQueueBuffer;
+	return NULL;
+#endif
 }
 
 /**
@@ -263,19 +315,44 @@ SemaphoreHandle_t htSemaphoreCreateMutexStatic(htQUEUE_t *pxQueueBuffer)
 SemaphoreHandle_t htSemaphoreCreateRecursiveMutex(void)
 {
 #if configUSE_RECURSIVE_MUTEXES == 1
-	QueueHandle_t xSemaphore;
-	htMutexHolder_t xMutexHolder = {NULL, 0U, htMUTEX_NO_INHERITED_PRIORITY};
-
-	xSemaphore = htQueueCreate(1U, sizeof(htMutexHolder_t));
-	if (xSemaphore == NULL) {
-		return NULL;
-	}
-	if (htQueueSend(xSemaphore, &xMutexHolder, 0U) != htPASS) {
-		htQueueDelete(xSemaphore);
-		return NULL;
+	QueueHandle_t xSemaphore = htQueueCreate(1U, 0U);
+	if (xSemaphore != NULL) {
+		prvInitRecursiveMutexFields((htQUEUE_t *)xSemaphore);
 	}
 	return xSemaphore;
 #else
+	return NULL;
+#endif
+}
+
+SemaphoreHandle_t htSemaphoreCreateRecursiveMutexStatic(htQUEUE_t *pxQueueBuffer)
+{
+#if (configUSE_RECURSIVE_MUTEXES == 1) && (configSUPPORT_STATIC_ALLOCATION == 1)
+	QueueHandle_t xSemaphore = htQueueCreateStatic(1U, 0U, NULL, pxQueueBuffer);
+	if (xSemaphore != NULL) {
+		prvInitRecursiveMutexFields((htQUEUE_t *)xSemaphore);
+	}
+	return xSemaphore;
+#else
+	(void)pxQueueBuffer;
+	return NULL;
+#endif
+}
+
+TaskHandle_t htSemaphoreGetMutexHolder(SemaphoreHandle_t xMutex)
+{
+#if configUSE_RECURSIVE_MUTEXES == 1
+	htQUEUE_t *pxQueue = (htQUEUE_t *)xMutex;
+	TaskHandle_t xHolder = NULL;
+
+	if (pxQueue != NULL && pxQueue->ucQueueType == htQUEUE_TYPE_RECURSIVE_MUTEX) {
+		htEnterCritical();
+		xHolder = (TaskHandle_t)pxQueue->u.xMutex.xTaskHandle;
+		htExitCritical();
+	}
+	return xHolder;
+#else
+	(void)xMutex;
 	return NULL;
 #endif
 }
@@ -408,7 +485,13 @@ BaseType_t htSemaphoreGiveFromISR(SemaphoreHandle_t xSemaphore, BaseType_t *pxHi
  */
 BaseType_t htSemaphoreTakeMutex(SemaphoreHandle_t xSemaphore, TickType_t xTicksToWait)
 {
+#if (configUSE_MUTEXES == 1)
 	return htSemaphoreTake(xSemaphore, xTicksToWait);
+#else
+	(void)xSemaphore;
+	(void)xTicksToWait;
+	return htFAIL;
+#endif
 }
 
 /**
@@ -443,73 +526,78 @@ BaseType_t htSemaphoreTakeRecursive(SemaphoreHandle_t xSemaphore, TickType_t xTi
 	const TickType_t xStartTime = xTickCount;
 	TickType_t xRemainingTicks = xTicksToWait;
 	htQUEUE_t *pxQueue = (htQUEUE_t *)xSemaphore;
-	htMutexHolder_t xMutexHolder;
 
-	if (pxQueue == NULL || pxCurrentTCB == NULL) {
+	if (pxQueue == NULL || pxCurrentTCB == NULL || pxQueue->ucQueueType != htQUEUE_TYPE_RECURSIVE_MUTEX) {
 		return htFAIL;
 	}
 
 	for (;;) {
-		/* 每一轮都在临界区内取出锁状态记录：拿到记录才谈得上判断能不能进入。 */
+		/* 直接在临界区内操作内嵌的 u.xMutex，不再通过 htQueueReceive/Send 反复入队，
+		 * 彻底消除持有期间放回记录导致等待者被虚假唤醒/活锁的缺陷。 */
 		htEnterCritical();
-		if (htQueueReceive(xSemaphore, &xMutexHolder, 0U) != htPASS) {
-			htExitCritical();
-			return htFAIL;
-		}
+		htMutexHolder_t *pxHolder = &(pxQueue->u.xMutex);
 
-		/* 无人持有则直接持有，已属于自己则只是递归重入。 */
-		if (xMutexHolder.xTaskHandle == NULL || xMutexHolder.xTaskHandle == pxCurrentTCB) {
-			if (xMutexHolder.xTaskHandle == NULL) {
-				xMutexHolder.xTaskHandle = pxCurrentTCB;
-				xMutexHolder.uxRecursiveCallCount = 1U;
-				xMutexHolder.uxOriginalPriority = htMUTEX_NO_INHERITED_PRIORITY;
-			} else {
-				xMutexHolder.uxRecursiveCallCount++;
-			}
-			(void)htQueueSend(xSemaphore, &xMutexHolder, 0U);
+		if (pxHolder->xTaskHandle == NULL) {
+			pxHolder->xTaskHandle = pxCurrentTCB;
+			pxHolder->uxRecursiveCallCount = 1U;
+			pxHolder->uxOriginalPriority = htMUTEX_NO_INHERITED_PRIORITY;
+			pxQueue->uxMessagesWaiting = 0U;
 			htExitCritical();
 			return htPASS;
 		}
 
-		/* 锁在别人手里且已经没有剩余等待时间：把记录原样放回后立即失败。 */
+		if (pxHolder->xTaskHandle == pxCurrentTCB) {
+			if (pxHolder->uxRecursiveCallCount == UINT32_MAX) {
+				htExitCritical();
+				return htFAIL;
+			}
+			pxHolder->uxRecursiveCallCount++;
+			htExitCritical();
+			return htPASS;
+		}
+
+		/* 锁在别人手里且无剩余等待时间：不继承、不唤醒，立即失败。 */
 		if (xRemainingTicks == 0U) {
-			(void)htQueueSend(xSemaphore, &xMutexHolder, 0U);
+			htExitCritical();
+			return htFAIL;
+		}
+		if (xRemainingTicks != htBLOCKED_INDEFINITELY &&
+				(pxDelayedTaskList == NULL || pxOverflowDelayedTaskList == NULL)) {
 			htExitCritical();
 			return htFAIL;
 		}
 
-		/* 锁被其他任务持有：先做优先级继承，再把记录放回队列（锁的所有权不变）。 */
-		prvInheritMutexOwnerPriority(&xMutexHolder);
-		(void)htQueueSend(xSemaphore, &xMutexHolder, 0U);
+		/* 锁被其他任务持有：提升持有者优先级并将当前任务挂入等待链表阻塞。 */
+		prvInheritMutexOwnerPriority(pxHolder);
 
-		/* 手工把当前任务挂到该队列的接收等待链表上，并按优先级排好事件链表项。 */
 		htListRemove(&(pxCurrentTCB->xStateListItem));
+		htSchedClearReadyPriorityIfEmpty(pxCurrentTCB->uxPriority);
 		htListRemove(&(pxCurrentTCB->xEventListItem));
 		htListSetItemValue(&(pxCurrentTCB->xEventListItem), configMAX_PRIORITIES - pxCurrentTCB->uxPriority);
 		htListInsert(&(pxQueue->xTasksWaitingToReceive), &(pxCurrentTCB->xEventListItem));
 
-		/* 有限等待时还要挂进延时链表；按唤醒时刻是否越过 xTickCount 决定放普通表还是溢出表。 */
 		if (xRemainingTicks != htBLOCKED_INDEFINITELY) {
 			const TickType_t xTimeToWake = xTickCount + xRemainingTicks;
 			htListSetItemValue(&(pxCurrentTCB->xStateListItem), xTimeToWake);
 			if (xTimeToWake > xTickCount) {
 				htListInsert(pxDelayedTaskList, &(pxCurrentTCB->xStateListItem));
+				if (xTimeToWake < xNextTaskUnblockTime) {
+					xNextTaskUnblockTime = xTimeToWake;
+				}
 			} else {
 				htListInsert(pxOverflowDelayedTaskList, &(pxCurrentTCB->xStateListItem));
 			}
 		}
 
-		/* 标记阻塞后退出临界区并让出 CPU，直到有人释放锁或延时到期把本任务唤醒。 */
 		pxCurrentTCB->uxTaskState = HT_TASK_BLOCKED;
 		htExitCritical();
 		htTaskYield();
 
-		/* 被唤醒后按实际经过的滴答扣减超时：无符号差值在 tick 回绕时依然正确。 */
 		if (xTicksToWait != htBLOCKED_INDEFINITELY) {
 			const TickType_t xElapsed = xTickCount - xStartTime;
 			if (xElapsed >= xTicksToWait) {
 				htEnterCritical();
-				(void)prvRestoreRecursiveMutexAfterTimeout(xSemaphore, pxQueue);
+				prvDisinheritRecursiveMutexAfterTimeout(pxQueue);
 				htExitCritical();
 				return htFAIL;
 			}
@@ -523,64 +611,56 @@ BaseType_t htSemaphoreTakeRecursive(SemaphoreHandle_t xSemaphore, TickType_t xTi
 #endif
 }
 
-/**
- * @brief 释放互斥量（与 htSemaphoreGive() 等价）。
- *
- * @param[in] xSemaphore 互斥量句柄。
- * @return htPASS 释放成功；htFAIL 参数非法或互斥量本来就处于未上锁状态。
- * @note 不校验调用者是不是“持有者”——普通互斥量没有持有者记录，
- *       误用（例如未获取就释放）只能靠调用者自己保证。
- */
 BaseType_t htSemaphoreGiveMutex(SemaphoreHandle_t xSemaphore)
 {
+#if (configUSE_MUTEXES == 1)
 	return htSemaphoreGive(xSemaphore);
+#else
+	(void)xSemaphore;
+	return htFAIL;
+#endif
 }
 
-/**
- * @brief 释放递归互斥量，只有递归计数归零时才真正解锁。
- *
- * @param[in] xSemaphore 递归互斥量句柄。
- * @return htPASS 释放成功（计数减 1）；htFAIL 参数非法、队列里没有记录，
- *         或当前任务并不是该锁的持有者。
- *
- * 处理过程：在临界区内取出锁状态记录，只有记录里的 xTaskHandle 等于当前任务
- * 且递归计数大于 0 时才把计数减 1；计数归零说明本轮是真正的解锁，此时撤销
- * 优先级继承、把持有者清成 NULL，最后无论成功与否都把记录放回队列，
- * 保证队列里始终保留一条锁状态记录。
- *
- * @note 计数未归零时不做任何调度动作，只是重入层数减少一层。
- * @note 解锁后由队列内核唤醒 xTasksWaitingToReceive 上优先级最高的等待者。
- * @warning 必须由持有者自己调用；其他任务调用会失败并返回 htFAIL。
- * @warning 必须在任务上下文调用，不能在中断中使用。
- */
 BaseType_t htSemaphoreGiveRecursive(SemaphoreHandle_t xSemaphore)
 {
 #if configUSE_RECURSIVE_MUTEXES == 1
 	BaseType_t xReturn = htFAIL;
+	BaseType_t xYieldRequired = htFALSE;
 	htQUEUE_t *pxQueue = (htQUEUE_t *)xSemaphore;
-	htMutexHolder_t xMutexHolder;
 
-	if (pxQueue == NULL || pxCurrentTCB == NULL) {
+	if (pxQueue == NULL || pxCurrentTCB == NULL || pxQueue->ucQueueType != htQUEUE_TYPE_RECURSIVE_MUTEX) {
 		return htFAIL;
 	}
 
 	htEnterCritical();
-	if (htQueueReceive(xSemaphore, &xMutexHolder, 0U) == htPASS) {
-		/* 只有持有者本人才能释放；递归计数未归零时不算真正解锁。 */
-		if (xMutexHolder.xTaskHandle == pxCurrentTCB && xMutexHolder.uxRecursiveCallCount > 0U) {
-			xMutexHolder.uxRecursiveCallCount--;
-			if (xMutexHolder.uxRecursiveCallCount == 0U) {
-				/* 最后一层释放：撤销优先级继承并清空持有者，锁真正变为可用。 */
-				prvRestoreMutexOwnerPriority(&xMutexHolder);
-				xMutexHolder.xTaskHandle = NULL;
+	htMutexHolder_t *pxHolder = &(pxQueue->u.xMutex);
+	if (pxHolder->xTaskHandle == pxCurrentTCB && pxHolder->uxRecursiveCallCount > 0U) {
+		pxHolder->uxRecursiveCallCount--;
+		if (pxHolder->uxRecursiveCallCount == 0U) {
+			const UBaseType_t uxPriorityBeforeRestore = pxCurrentTCB->uxPriority;
+			/* 最后一层释放：撤销优先级继承、清空持有者并唤醒最高优先级等待者。 */
+			prvRestoreMutexOwnerPriority(pxHolder);
+			pxHolder->xTaskHandle = NULL;
+			pxQueue->uxMessagesWaiting = 1U;
+
+			htTCB_t *pxUnblocked = prvUnblockMutexWaiter(&(pxQueue->xTasksWaitingToReceive));
+#if (configUSE_PREEMPTION == 1)
+			if ((pxUnblocked != NULL && pxUnblocked->uxPriority > pxCurrentTCB->uxPriority) ||
+					pxCurrentTCB->uxPriority < uxPriorityBeforeRestore) {
+				xYieldRequired = htTRUE;
 			}
-			xReturn = htPASS;
+#else
+			(void)pxUnblocked;
+			(void)uxPriorityBeforeRestore;
+#endif
 		}
-		/* 无论释放是否成功都要把记录放回，否则队列里的锁状态会丢失。 */
-		(void)htQueueSend(xSemaphore, &xMutexHolder, 0U);
+		xReturn = htPASS;
 	}
 	htExitCritical();
 
+	if (xYieldRequired == htTRUE) {
+		htTaskYield();
+	}
 	return xReturn;
 #else
 	(void)xSemaphore;

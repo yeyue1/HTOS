@@ -80,29 +80,40 @@ jobs:
       - name: Check formatting
         run: |
           clang-format --dry-run --Werror \
-            include/htconfig.h include/htlist.h include/htmem.h include/htqueue.h include/htscheduler.h \
-            include/htsemaphore.h include/httask.h include/htos.h \
-            include/htlatency.h include/httypes.h include/htutils.h include/htwatchdog.h \
-            kernel/htlatency.c kernel/htlist.c kernel/htmem.c kernel/htos.c kernel/htqueue.c kernel/htschededf.c kernel/htschedfair.c kernel/htschedpolicy.c kernel/htscheduler.c kernel/htsemaphore.c kernel/httask.c kernel/htutils.c kernel/htwatchdog.c \
+            include/*.h \
+            kernel/*.c \
             portable/Cortex-M/htPort.h portable/Cortex-M/htPortContext.c \
+            portable/Host/htPort.h \
             tests/stubs/core_cm3.h tests/stubs/stm32f1xx.h tests/stubs/stm32f1xx_hal.h \
-            tests/test_example.c tests/test_latency.c tests/test_list.c tests/test_mem.c tests/test_queue.c tests/test_schedpolicy.c tests/test_task.c tests/test_utils.c tests/test_watchdog.c
+            tests/test_*.c
 
-      - name: Run clang-tidy safety checks
+      - name: Run clang-tidy safety checks across all kernel sources
         run: |
           clang-tidy \
-            kernel/htlatency.c kernel/htlist.c kernel/htmem.c kernel/htqueue.c kernel/htsemaphore.c kernel/htwatchdog.c \
-            --checks='-*,clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,bugprone-sizeof-expression,bugprone-suspicious-memory-comparison' \
+            kernel/*.c \
+            --checks='-*,clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,bugprone-sizeof-expression,bugprone-suspicious-memory-comparison,bugprone-branch-clone' \
             --warnings-as-errors='*' \
-            -- -std=c11 -Iinclude
+            -- -std=c11 -DHTOS_HOST_TEST \
+            -DconfigUSE_LATENCY_STATS=1 -DconfigUSE_STATS_FORMATTING_FUNCTIONS=1 \
+            -DconfigUSE_SCHED_POLICY_FAIR_SHARE=1 -DconfigUSE_SCHED_POLICY_EDF=1 \
+            -DconfigUSE_TIMERS=1 -DconfigUSE_EVENT_GROUPS=1 -DconfigUSE_BLOCK_POOL=1 \
+            -Iinclude -Iportable/Host -Itests/stubs
 
-      - name: Compile scheduler and task lifecycle boundary
+      - name: Verify HAL-free kernel boundary
+        run: |
+          ! grep -rnE 'stm32f1xx|core_cm3|0xE000' kernel/
+
+      - name: Compile full kernel under host Clang
         run: |
           clang -fsyntax-only \
             -std=c11 -Wall -Wextra -Wpedantic -Werror \
             -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
-            -Itests/stubs -Iinclude \
-            kernel/htlatency.c kernel/htos.c kernel/httask.c kernel/htscheduler.c kernel/htutils.c kernel/htwatchdog.c
+            -DHTOS_HOST_TEST \
+            -DconfigUSE_LATENCY_STATS=1 -DconfigUSE_STATS_FORMATTING_FUNCTIONS=1 \
+            -DconfigUSE_SCHED_POLICY_FAIR_SHARE=1 -DconfigUSE_SCHED_POLICY_EDF=1 \
+            -DconfigUSE_TIMERS=1 -DconfigUSE_EVENT_GROUPS=1 -DconfigUSE_BLOCK_POOL=1 \
+            -Iinclude -Iportable/Host -Itests/stubs \
+            kernel/*.c
 
       - name: Compile GCC-compatible Cortex-M3 port
         run: |
@@ -111,7 +122,7 @@ jobs:
             -Itests/stubs -Iinclude -Iportable/Cortex-M \
             portable/Cortex-M/htPortContext.c
 
-      - name: Run cppcheck
+      - name: Run cppcheck across all kernel sources
         run: |
           cppcheck \
             --language=c --std=c11 \
@@ -119,5 +130,9 @@ jobs:
             --error-exitcode=1 \
             --inline-suppr \
             --suppress=missingIncludeSystem \
-            -Iinclude \
-            kernel/htlatency.c kernel/htlist.c kernel/htmem.c kernel/htqueue.c kernel/htsemaphore.c kernel/htwatchdog.c
+            -DHTOS_HOST_TEST \
+            -DconfigUSE_LATENCY_STATS=1 -DconfigUSE_STATS_FORMATTING_FUNCTIONS=1 \
+            -DconfigUSE_SCHED_POLICY_FAIR_SHARE=1 -DconfigUSE_SCHED_POLICY_EDF=1 \
+            -DconfigUSE_TIMERS=1 -DconfigUSE_EVENT_GROUPS=1 -DconfigUSE_BLOCK_POOL=1 \
+            -Iinclude -Iportable/Host -Itests/stubs \
+            kernel/*.c

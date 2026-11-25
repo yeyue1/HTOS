@@ -84,19 +84,6 @@ static void test_time_conversions_do_not_overflow_intermediate_math(void)
 }
 
 /**
- * @brief 未启用运行时统计时，三个查询接口必须稳定返回 0。
- *
- * 断言意图：占位实现返回 0 表示「没有数据」；若返回非零，上层会误读成
- * 真实负载（例如 100% 满载），因此这里把这个契约锁死。
- */
-static void test_runtime_stats_report_unavailable_as_zero(void)
-{
-	TEST_ASSERT_EQUAL(0, htGetCPUUsage());
-	TEST_ASSERT_EQUAL(0, htGetIdleRunTimePercent());
-	TEST_ASSERT_EQUAL(0, htGetRunTimeCounter());
-}
-
-/**
  * @brief 套件入口：注册并顺序执行本文件全部用例。
  *
  * @return UnityEnd() 的返回值，即失败的用例数；0 表示全部通过。
@@ -107,6 +94,5 @@ int main(void)
 	RUN_TEST(test_stack_high_water_mark_counts_untouched_words);
 	RUN_TEST(test_stack_high_water_mark_rejects_invalid_task);
 	RUN_TEST(test_time_conversions_do_not_overflow_intermediate_math);
-	RUN_TEST(test_runtime_stats_report_unavailable_as_zero);
 	return UnityEnd();
 }

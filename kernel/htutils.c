@@ -17,11 +17,27 @@
  */
 uint32_t htTimeToTicks(uint32_t milliseconds)
 {
+#if (configTICK_RATE_HZ == 1000)
+	return milliseconds;
+#else
 	if (milliseconds == 0U) {
 		return 0U;
 	}
-	const uint64_t ticks = ((uint64_t)milliseconds * configTICK_RATE_HZ + 999U) / 1000U;
-	return ticks > UINT32_MAX ? UINT32_MAX : (uint32_t)ticks;
+	/* 纯 32 位定点数拆分商与余数，避免引入 64 位软件除法 __udivmoddi4 同时防止中间溢出。 */
+	const uint32_t ulRate = (uint32_t)configTICK_RATE_HZ;
+	const uint32_t ulSeconds = milliseconds / 1000U;
+	const uint32_t ulRemMs = milliseconds % 1000U;
+
+	if (ulSeconds > (UINT32_MAX / ulRate)) {
+		return UINT32_MAX;
+	}
+	const uint32_t ulWholeTicks = ulSeconds * ulRate;
+	const uint32_t ulRemTicks = (ulRemMs == 0U) ? 0U : (((ulRemMs * ulRate) + 999U) / 1000U);
+	if (ulRemTicks > (UINT32_MAX - ulWholeTicks)) {
+		return UINT32_MAX;
+	}
+	return ulWholeTicks + ulRemTicks;
+#endif
 }
 
 /**
@@ -34,8 +50,23 @@ uint32_t htTimeToTicks(uint32_t milliseconds)
  */
 uint32_t htTicksToTime(TickType_t ticks)
 {
-	const uint64_t milliseconds = ((uint64_t)ticks * 1000U) / configTICK_RATE_HZ;
-	return milliseconds > UINT32_MAX ? UINT32_MAX : (uint32_t)milliseconds;
+#if (configTICK_RATE_HZ == 1000)
+	return (uint32_t)ticks;
+#else
+	const uint32_t ulRate = (uint32_t)configTICK_RATE_HZ;
+	const uint32_t ulSeconds = (uint32_t)ticks / ulRate;
+	const uint32_t ulRemTicks = (uint32_t)ticks % ulRate;
+
+	if (ulSeconds > (UINT32_MAX / 1000U)) {
+		return UINT32_MAX;
+	}
+	const uint32_t ulWholeMs = ulSeconds * 1000U;
+	const uint32_t ulRemMs = (ulRemTicks * 1000U) / ulRate;
+	if (ulRemMs > (UINT32_MAX - ulWholeMs)) {
+		return UINT32_MAX;
+	}
+	return ulWholeMs + ulRemMs;
+#endif
 }
 
 /**
@@ -61,40 +92,8 @@ UBaseType_t htGetTaskStackHighWaterMark(TaskHandle_t xTask)
 	return uxUntouchedWords;
 }
 
-/**
- * @brief 获取 CPU 使用率。
- *
- * @return 固定返回 0，单位为百分比。
- * @note 当前版本没有实现运行时统计计数器，这里返回 0，避免把“没有数据”
- *       误报成 100% 满载。
+/*
+ * 运行时间统计（htGetCPUUsage / htGetIdleRunTimePercent / htGetRunTimeCounter）
+ * 的实现在 kernel/httask.c：它必须跟着 SysTick 采样走，也要直接读当前任务的 TCB，
+ * 放在这里只会平白多一条跨文件依赖。本文件只保留与本模块无关的换算与栈分析。
  */
-uint32_t htGetCPUUsage(void)
-{
-	/* 未配置运行时计数器时返回 0，避免误报 100% 负载。 */
-	return 0U;
-}
-
-/**
- * @brief 获取空闲任务占用 CPU 时间的百分比。
- *
- * @return 固定返回 0，单位为百分比。
- * @note 占位实现：尚未启用 configGENERATE_RUN_TIME_STATS 一类的运行时统计，
- *       因此不产生有效数值。
- */
-uint32_t htGetIdleRunTimePercent(void)
-{
-	/* 简化实现 */
-	return 0;
-}
-
-/**
- * @brief 获取系统运行时间计数。
- *
- * @return 固定返回 0。
- * @note 占位实现，预留给将来基于高精度时基累计的运行时间统计；
- *       需要时间基准时请改用 xTickCount 或 htTicksToTime()。
- */
-uint64_t htGetRunTimeCounter(void)
-{
-	return 0;
-}

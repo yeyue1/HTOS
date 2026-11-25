@@ -100,44 +100,45 @@ enum htTaskPriority { HT_IDLE_TASK = 0, HT_LOW_TASK, HT_NORMAL_TASK, HT_HIGH_TAS
  *
  * 传给所有 take/receive 类接口的 xTicksToWait 参数表示永久等待，不会超时。
  */
-#define htBLOCKED_INDEFINITELY (0xFFFFFFFF)
+#define htBLOCKED_INDEFINITELY ((TickType_t)0xFFFFFFFFUL)
 
 /* ------------------------------------------------------------------ */
 /* 5. 链表结构                                                          */
 /* ------------------------------------------------------------------ */
 
+struct htList;
+
 /**
- * @brief 双向循环链表的一个节点。
+ * @brief 双向循环链表的一个完整节点。
  *
  * 节点直接内嵌在任务 TCB 等对象中，内核不为链表单独分配内存。
  */
-struct htListItem {
+typedef struct htListItem {
 	TickType_t xItemValue; /**< 排序值：就绪表用优先级、延时表用唤醒 tick */
 	struct htListItem *pxNext; /**< 下一个节点 */
 	struct htListItem *pxPrevious; /**< 上一个节点 */
-	struct htList *pvOwner; /**< 节点所有者，通常是它所在任务的 TCB */
+	void *pvOwner; /**< 节点所有者，通常是它所在任务的 TCB */
 	struct htList *pxContainer; /**< 节点当前所属的链表，NULL 表示未挂入任何链表 */
-};
+} htListItem_t;
 
 /**
- * @brief 带哨兵的双向循环链表。
- *
- * 头尾通过固定的 xListEnd 哨兵相连，因此遍历时不需要判空。
+ * @brief 精简链表尾哨兵节点（不含 pvOwner / pxContainer），用于压缩每个 htList_t 的内存占用。
  */
-struct htList {
+typedef struct htMiniListItem {
+	TickType_t xItemValue; /**< 尾哨兵排序值，固定为 UINT32_MAX */
+	struct htListItem *pxNext; /**< 指向链表首节点，空表时指向哨兵自身 */
+	struct htListItem *pxPrevious; /**< 指向链表尾节点，空表时指向哨兵自身 */
+} htMiniListItem_t;
+
+/**
+ * @brief 带精简哨兵的双向循环链表（32 位目标仅占 20 字节）。
+ *
+ * 头尾通过固定的 xListEnd 精简哨兵相连，遍历结束条件为节点等于哨兵地址。
+ */
+typedef struct htList {
 	UBaseType_t uxNumberOfItems; /**< 当前节点数量 */
-	struct htListItem *pxHead; /**< 指向第一个节点；空表时指向 xListEnd */
-	struct htListItem *pxIndex; /**< 遍历索引，轮转调度靠它指向下一个候选任务 */
-	struct htListItem xListEnd; /**< 尾哨兵，xItemValue 固定为 0xFFFFFFFF */
-};
-
-/* ------------------------------------------------------------------ */
-/* 6. 结构体别名                                                        */
-/* ------------------------------------------------------------------ */
-
-/** @brief 链表节点的类型别名。 */
-#define htListItem_t struct htListItem
-/** @brief 链表的类型别名。 */
-#define htList_t struct htList
+	htListItem_t *pxIndex; /**< 遍历索引，轮转调度靠它指向下一个候选任务 */
+	htMiniListItem_t xListEnd; /**< 精简尾哨兵，xItemValue 固定为 0xFFFFFFFF */
+} htList_t;
 
 #endif /* HT_TYPES_H */

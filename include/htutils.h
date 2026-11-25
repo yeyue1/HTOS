@@ -3,7 +3,8 @@
  * @brief 时间换算、堆栈分析与系统统计接口。
  *
  * 这里的函数面向应用层：把毫秒与 tick 互相换算、查询任务栈的剩余余量，
- * 以及（预留的）CPU 占用统计。注意其中的统计类接口当前均为桩实现，恒返回 0。
+ * 以及 CPU 占用统计。统计类接口在 configGENERATE_RUN_TIME_STATS 为 1 时返回实测值，
+ * 为 0 时恒返回 0（表示"没有这项数据"，而不是"很空闲"）。
  */
 #ifndef HT_UTILS_H
 #define HT_UTILS_H
@@ -24,22 +25,32 @@
 /* 1. 系统统计                                                          */
 /* ------------------------------------------------------------------ */
 
+#if (configGENERATE_RUN_TIME_STATS == 1)
+/**
+ * @brief 采样一次运行时间，把上一个 tick 记到当前任务头上。
+ *
+ * @note 由 htTaskTickInc() 在关中断状态下每毫秒调用一次，应用不要直接调用。
+ */
+void htRunTimeSample(void);
+#endif
+
 /**
  * @brief 读取空闲任务的运行时间百分比。
  *
- * @return 百分比数值；当前为桩实现，恒返回 0（尚未接入运行时统计）。
+ * @return 0~100 的百分比，是"自启动以来的平均值"；统计关闭时恒返回 0。
+ * @note 实现在 kernel/httask.c：统计跟着滴答采样，并直接累加到任务控制块上。
  */
 uint32_t htGetIdleRunTimePercent(void);
 /**
  * @brief 读取 CPU 使用率。
  *
- * @return 使用率百分比；当前为桩实现，恒返回 0（尚未接入运行时统计）。
+ * @return 0~100 的百分比，等于 100 减去空闲占比；统计关闭时恒返回 0。
  */
 uint32_t htGetCPUUsage(void);
 /**
  * @brief 读取系统累计运行时间计数。
  *
- * @return 64 位计数值；当前为桩实现，恒返回 0（尚未接入运行时统计）。
+ * @return 64 位周期计数；72 MHz 下除以 72000 即得毫秒数。统计关闭时恒返回 0。
  */
 uint64_t htGetRunTimeCounter(void);
 
