@@ -40,6 +40,19 @@ extern "C" {
 #define BOARD_CONSOLE_TX_RETRIES 3U /*!< UART 忙时的重试次数 */
 
 /**
+ * @brief 1 = 启用非阻塞环形缓冲 + TXE/TC 中断驱动控制台发送；
+ *        0 = 沿用默认轮询发送（零额外 RAM，零串口中断）。
+ */
+#ifndef BOARD_CONSOLE_ASYNC_TX
+#define BOARD_CONSOLE_ASYNC_TX 0
+#endif
+
+/** @brief 异步控制台发送环形缓冲区容量（必须为 2 的幂）。 */
+#ifndef BOARD_CONSOLE_TX_BUF_SIZE
+#define BOARD_CONSOLE_TX_BUF_SIZE 256U
+#endif
+
+/**
  * @brief 建立 72 MHz 时钟树（HSE 8 MHz -> PLL x9）和 1 kHz SysTick 时基。
  *
  * SysTick 是唯一的 RTOS tick 来源，所以 tick 频率也在这里一并配好。
@@ -97,6 +110,20 @@ void board_console_putc(char c);
  * @warning 不要在任何中断处理函数里调用，理由同 board_console_putc()。
  */
 void board_console_write(const char *text, uint32_t length);
+
+/**
+ * @brief 应急/HardFault 裸寄存器同步发送，完全绕过 HAL 锁与 HAL_GetTick()。
+ *
+ * @param[in] text 待发送的字节。
+ * @param[in] length 待发送的字节数。
+ * @note 专为 HardFault、致命停机和关中断场景设计，即便故障前有任务持有 UART HAL 锁也能输出。
+ */
+void board_console_write_panic(const char *text, uint32_t length);
+
+#if (BOARD_CONSOLE_ASYNC_TX == 1)
+/** @brief USART3 中断驱动发送服务函数，由 stm32f1xx_it.c 的 USART3_IRQHandler 调用。 */
+void board_console_irq_handler(void);
+#endif
 
 /** @brief 启动 IWDG：256 分频、12 位重装，名义约 26.2 s（LSI 40 kHz）。 */
 uint32_t board_watchdog_init(void);

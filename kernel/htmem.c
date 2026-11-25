@@ -27,6 +27,7 @@
 #include "htmem.h"
 #include "htconfig.h"
 #include "htscheduler.h"
+#include "htPort.h"
 
 /*
  * 一级索引上限必须能覆盖整个堆：FL 索引由块大小的最高有效位决定，
@@ -85,11 +86,8 @@ __attribute__((weak)) void htMallocFailedHook(size_t xWantedSize)
 static inline int tlsf_block_within_heap(const block_header_t *block);
 
 /**
- * @name 位操作辅助函数（ARM Cortex-M 兼容版）
- * 不依赖编译器内建函数，纯 C 实现，保证不同工具链下行为一致。
- * 在 TLSF 算法中的两个用途：
- * 1. tlsf_fls()：由块大小算出一级索引 FL；
- * 2. tlsf_ffs()：在位图中找到第一个置位的位，即第一个非空空闲链表。
+ * @name 位操作辅助函数（经由移植层 CLZ / RBIT 硬件加速）
+ * 在 Cortex-M3 上分别展开为单周期 CLZ 与双指令 RBIT+CLZ，主机测试由 portable/Host/htPort.h 实现。
  * @{
  */
 
@@ -98,39 +96,13 @@ static inline int tlsf_block_within_heap(const block_header_t *block);
  *
  * @param[in] word 输入的 32 位无符号整数。
  * @return 最高有效位的位序号（0-31）；输入为 0 时返回 0。
- *
- * 算法原理：二分查找，把候选区间每次折半，检查高半区是否全为 0；
- * 若高半区为 0 则左移屏蔽、把答案压到低半区继续，最多 5 轮。
- * 时间复杂度 O(log 32) = 5 次判断，常数时间，无循环。
  */
 static inline int tlsf_fls(unsigned int word)
 {
-	if (word == 0)
+	if (word == 0U) {
 		return 0;
-
-	int bit = 32;
-	/* 二分查找：每次排除一半的位 */
-	if (!(word & 0xFFFF0000)) {
-		word <<= 16;
-		bit -= 16;
-	} /* 高16位为0，查找低16位 */
-	if (!(word & 0xFF000000)) {
-		word <<= 8;
-		bit -= 8;
-	} /* 高8位为0，查找低8位 */
-	if (!(word & 0xF0000000)) {
-		word <<= 4;
-		bit -= 4;
-	} /* 高4位为0，查找低4位 */
-	if (!(word & 0xC0000000)) {
-		word <<= 2;
-		bit -= 2;
-	} /* 高2位为0，查找低2位 */
-	if (!(word & 0x80000000)) {
-		bit -= 1;
-	} /* 最高位为0，查找次高位 */
-
-	return bit - 1; /* 转换为从0开始的索引 */
+	}
+	return (int)(31U - htPortCountLeadingZeros((uint32_t)word));
 }
 
 /**
@@ -138,40 +110,13 @@ static inline int tlsf_fls(unsigned int word)
  *
  * @param[in] word 输入的 32 位无符号整数（通常是位图）。
  * @return 最低有效位的位序号（0-31）；输入为 0 时返回 -1。
- *
- * 算法原理：与 tlsf_fls() 对称，但改为检查低半区是否全为 0，
- * 是则右移屏蔽、把答案压到高半区继续。同样最多 5 轮判断，常数时间。
- * @note 返回值 -1 是“位图全 0、没有可用空闲链表”的约定信号，
- *       调用方必须判负，否则会被当成合法索引使用。
  */
 static inline int tlsf_ffs(unsigned int word)
 {
-	if (word == 0)
+	if (word == 0U) {
 		return -1;
-
-	int bit = 0;
-	/* 二分查找：从低位向高位查找 */
-	if (!(word & 0x0000FFFF)) {
-		word >>= 16;
-		bit += 16;
-	} /* 低16位为0，查找高16位 */
-	if (!(word & 0x000000FF)) {
-		word >>= 8;
-		bit += 8;
-	} /* 低8位为0，查找高8位 */
-	if (!(word & 0x0000000F)) {
-		word >>= 4;
-		bit += 4;
-	} /* 低4位为0，查找高4位 */
-	if (!(word & 0x00000003)) {
-		word >>= 2;
-		bit += 2;
-	} /* 低2位为0，查找高2位 */
-	if (!(word & 0x00000001)) {
-		bit += 1;
-	} /* 最低位为0，查找次低位 */
-
-	return bit;
+	}
+	return (int)htPortCountLeadingZeros(htPortReverseBits((uint32_t)word));
 }
 
 /**
@@ -594,40 +539,6 @@ static void tlsf_insert_free_block(tlsf_control_t *control, block_header_t *bloc
 	control->sl_bitmap[fl] |= (1U << sl);
 }
 
-/*
- * 已退役的旧实现：下面保留的是本文件早期版本的 tlsf_search_suitable_block()，
- * 仅作算法思路对照，不参与编译。
- *
- * 它只做“当前 FL 的 SL 位图 → 更高的 FL”一趟扫描，没有任何索引边界检查：
- * 一旦入参 fl/sl 越界（控制结构被写坏，或调用方算错档位），~0U << sl 就是未定义行为，
- * 随后还会越界访问 blocks[][]。现行实现因此加上了范围钳位与 while 重试循环。
- *
- * 旧版算法要点：先在当前 FL 的 SL 位图中找“>= sl”的非空位；找不到就取 fl_bitmap 中
- * 更高 FL 的非空位，并从该 FL 的 SL=0 重新找；最后返回对应链表头。
- * static block_header_t *tlsf_search_suitable_block(tlsf_control_t *control, int *fli, int *sli)
- * {
- * 	int fl = *fli;
- * 	int sl = *sli;
- * 	先在当前 FL 的 SL 位图中查找
- * 	unsigned int sl_map = control->sl_bitmap[fl] & (~0U << sl);
- * 	if (!sl_map) {
- * 		当前 FL 没有合适的 SL，改找更高的 FL
- * 		const unsigned int fl_map = control->fl_bitmap & (~0U << (fl + 1));
- * 		if (!fl_map) {
- * 			return NULL;
- * 		}
- *
- * 		fl = tlsf_ffs(fl_map);
- * 		*fli = fl;
- * 		sl_map = control->sl_bitmap[fl];
- * 	}
- * 	sl = tlsf_ffs(sl_map);
- * 	*sli = sl;
- *
- * 	return control->blocks[fl][sl];
- * }
- */
-
 static block_header_t *tlsf_search_suitable_block(tlsf_control_t *control, int *fli, int *sli)
 {
 	int fl = *fli;
@@ -646,6 +557,9 @@ static block_header_t *tlsf_search_suitable_block(tlsf_control_t *control, int *
 
 	/* 如果当前 FL 没有合适的 SL，循环查找更高的 FL（直到找到或没有更高的 FL） */
 	while (!sl_map) {
+		if ((fl + 1) >= TLSF_FL_INDEX_COUNT) {
+			return NULL;
+		}
 		const unsigned int fl_map = control->fl_bitmap & (~0U << (fl + 1));
 		if (!fl_map) {
 			/* 所有更高 FL 都没有空闲链表 */
@@ -661,7 +575,6 @@ static block_header_t *tlsf_search_suitable_block(tlsf_control_t *control, int *
 		/* 在新的 FL 从 SL=0 开始查找 */
 		sl_map = control->sl_bitmap[fl];
 		if (!sl_map) {
-			/* 保险起见继续循环（理论上 fl_map 保证该 FL 有非零 sl_bitmap，但加入循环更稳健） */
 			continue;
 		}
 		break;
@@ -677,36 +590,21 @@ static block_header_t *tlsf_search_suitable_block(tlsf_control_t *control, int *
 	return control->blocks[fl][next_sl];
 }
 
-/**
- * @brief 把一个大空闲块切成“前半部分交给分配器、后半部分继续空闲”两块。
- *
- * @param[in,out] block 待分割的空闲块（调用前已从空闲链表摘除）。
- * @param[in] size 前半部分要保留的字节数（含块头，已对齐）。
- * @return 切出来的后半部分块头指针；无法分割时返回 NULL。
- *
- * 后半部分的块头直接落在 block + size 处，把原块剩余的长度、空闲状态、
- * “前块已用”标志和 prev_phys_block 都补齐；前半部分则收缩到 size 并标记为已分配。
- * 这样前后两块在物理上依然首尾相接，后续释放时还能再次合并回来。
- *
- * @note 只有在“剩余长度足够再放一个块头”时调用者才应调用本函数，
- *       这个判断在 htPortMalloc() 里用 block_size_real >= block_size + HEADER + ALIGN 完成。
- * @note 若算出的后半块越出堆范围则放弃分割并返回 NULL：此时宁可整块分配出去，
- *       也不能在堆尾写出一个残缺块头。
- */
 static block_header_t *tlsf_block_split(block_header_t *block, size_t size)
 {
 	/* 剩余块紧接在 block + size 处 */
 	block_header_t *remaining = tlsf_offset_to_block(block, size);
 
 	const size_t remain_size = tlsf_block_size(block) - size;
-	/* 如果 remaining 不在堆内，则不进行分割 */
-	if (!tlsf_block_within_heap(remaining)) {
+	/* 如果 remaining 不在堆内或不足以容纳最小空闲块，则不进行分割 */
+	if (!tlsf_block_within_heap(remaining) || remain_size < TLSF_MIN_BLOCK_SIZE) {
 		return NULL;
 	}
 
 	remaining->size = remain_size;
-	// 设置剩余块为空闲，前块为已用，初始化时主块前无块
-	tlsf_block_set_free(remaining);
+	/* 重连 remaining 与物理后继块的 prev_phys_block 并同步其 PREV_FREE 标志，
+	 * 防止原后继块仍指向分裂前的 block 而触发释放校验失败。 */
+	tlsf_block_mark_as_free(remaining);
 	tlsf_block_set_prev_used(remaining);
 	remaining->prev_phys_block = block;
 
@@ -824,7 +722,7 @@ static inline int tlsf_block_within_heap(const block_header_t *block)
 {
 	const char *b = (const char *)block;
 	const char *start = (const char *)g_tlsf_heap;
-	const char *end = (const char *)g_tlsf_heap + configTOTAL_HEAP_SIZE;
+	const char *end = (const char *)g_tlsf_heap + (size_t)configTOTAL_HEAP_SIZE;
 	return (b >= start && b < end);
 }
 
@@ -855,20 +753,22 @@ void htMemInit(void)
 	memset(&g_tlsf_control, 0, sizeof(tlsf_control_t));
 
 	/* 初始化堆区域 */
-	const size_t pool_bytes = configTOTAL_HEAP_SIZE;
+	const size_t pool_bytes = (size_t)configTOTAL_HEAP_SIZE;
 
 	/* 把堆起始地址向上对齐；对齐吃掉的字节数要从可用容量里扣除 */
 	char *mem_ptr = (char *)tlsf_align_up((size_t)g_tlsf_heap, TLSF_ALIGN_SIZE);
 	const size_t pool_adjusted = pool_bytes - ((size_t)mem_ptr - (size_t)g_tlsf_heap);
 
-	/* 需要至少能放下一个 header 和哨兵 header */
-	if (pool_adjusted <= TLSF_BLOCK_HEADER_SIZE * 1) {
-		/* 连“一个块 + 一个哨兵块头”都放不下：配置错误，放弃初始化 */
+	/* 需要至少能放下一个最小空闲块和尾部哨兵块头（prev_phys_block + size）。 */
+	if (pool_adjusted < (TLSF_MIN_BLOCK_SIZE + TLSF_BLOCK_HEADER_SIZE)) {
 		return;
 	}
 
-	/* 计算初始块的总大小（包含当前块头），保留一个尾部 header 作为哨兵 */
-	size_t initial_block_size = pool_adjusted - TLSF_BLOCK_HEADER_SIZE; /* 保留尾部 header */
+	/* 计算初始块的总大小（向下对齐到 TLSF_ALIGN_SIZE），尾部保留一个哨兵块头。 */
+	const size_t initial_block_size = (pool_adjusted - TLSF_BLOCK_HEADER_SIZE) & ~(TLSF_ALIGN_SIZE - 1U);
+	if (initial_block_size < TLSF_MIN_BLOCK_SIZE) {
+		return;
+	}
 
 	/* 创建主区域的空闲块（block->size 存储整个块的字节数，包括 header） */
 	block_header_t *block = (block_header_t *)mem_ptr;
@@ -931,23 +831,31 @@ void htMemInit(void)
  */
 void *htPortMalloc(size_t size)
 {
-	if (!g_tlsf_initialized) {
-		htMemInit();
-	}
-
-	/* 未初始化、请求长度为 0，或长度大到对齐时会溢出 size_t：一律失败 */
-	if (!g_tlsf_initialized || size == 0U || size > SIZE_MAX - (TLSF_ALIGN_SIZE - 1U)) {
+	/* 请求长度为 0 或长度大到对齐时会溢出 size_t：一律失败 */
+	if (size == 0U || size > SIZE_MAX - (TLSF_ALIGN_SIZE - 1U)) {
 		return NULL;
 	}
 
 	const size_t adjust = tlsf_align_up(size, TLSF_ALIGN_SIZE);
-	if (adjust > SIZE_MAX - TLSF_BLOCK_HEADER_SIZE) {
+	if (adjust > SIZE_MAX - TLSF_BLOCK_START_OFFSET) {
 		return NULL;
 	}
-	/* 实际块大小 = 对齐后的用户区 + 块头，再整体对齐一次，保证后继块头也满足对齐 */
-	const size_t block_size = tlsf_align_up(adjust + TLSF_BLOCK_HEADER_SIZE, TLSF_ALIGN_SIZE);
+	/* 实际块大小 = 对齐后的用户区 + 复用后的最小块头开销，且不小于 TLSF_MIN_BLOCK_SIZE。 */
+	size_t block_size = tlsf_align_up(adjust + TLSF_BLOCK_START_OFFSET, TLSF_ALIGN_SIZE);
+	if (block_size < TLSF_MIN_BLOCK_SIZE) {
+		block_size = TLSF_MIN_BLOCK_SIZE;
+	}
 
 	htEnterCritical();
+
+	/* 惰性初始化放在临界区内，避免并发首次分配竞态。 */
+	if (!g_tlsf_initialized) {
+		htMemInit();
+	}
+	if (!g_tlsf_initialized) {
+		htExitCritical();
+		return NULL;
+	}
 
 	if (block_size <= g_tlsf_control.free_size) {
 		int fl, sl;
@@ -961,14 +869,18 @@ void *htPortMalloc(size_t size)
 			/* 先从 free_size 减去整个块 */
 			g_tlsf_control.free_size -= block_size_real;
 
-			/* 剩余空间还能再放一个“块头 + 最小块”时才值得分割，否则整块给出去 */
-			if (block_size_real >= block_size + TLSF_BLOCK_HEADER_SIZE + TLSF_ALIGN_SIZE) {
+			/* 剩余空间足以容纳一个完整最小空闲块（含空闲链表指针）时才分割，否则整块给出去。 */
+			if (block_size_real >= block_size + TLSF_MIN_BLOCK_SIZE) {
 				block_header_t *remaining = tlsf_block_split(block, block_size);
-				/* 剩余块加回 free_size */
-				size_t remaining_size = tlsf_block_size(remaining);
-				g_tlsf_control.free_size += remaining_size;
-				tlsf_mapping_insert(remaining_size, &fl, &sl);
-				tlsf_insert_free_block(&g_tlsf_control, remaining, fl, sl);
+				if (remaining != NULL) {
+					/* 剩余块加回 free_size */
+					size_t remaining_size = tlsf_block_size(remaining);
+					g_tlsf_control.free_size += remaining_size;
+					tlsf_mapping_insert(remaining_size, &fl, &sl);
+					tlsf_insert_free_block(&g_tlsf_control, remaining, fl, sl);
+				} else {
+					tlsf_block_mark_as_used(block);
+				}
 			} else {
 				tlsf_block_mark_as_used(block);
 			}
@@ -1027,24 +939,24 @@ void htPortFree(void *ptr)
 
 	block_header_t *block = tlsf_block_from_ptr(ptr);
 
+	const char *const heap_start = (const char *)g_tlsf_heap;
+	const char *const heap_end = heap_start + (size_t)configTOTAL_HEAP_SIZE;
+
 	/* 验证指针有效性 */
-	if ((char *)block < (char *)g_tlsf_heap || (char *)block >= (char *)g_tlsf_heap + configTOTAL_HEAP_SIZE) {
+	if ((char *)block < heap_start || (char *)block + TLSF_MIN_BLOCK_SIZE > heap_end) {
 		htExitCritical();
 		return;
 	}
 	const size_t original_size = tlsf_block_size(block);
-	if (tlsf_block_is_free(block) || original_size < TLSF_BLOCK_HEADER_SIZE ||
-			(original_size & (TLSF_ALIGN_SIZE - 1U)) != 0U ||
-			(char *)block + original_size > (char *)g_tlsf_heap + configTOTAL_HEAP_SIZE) {
+	if (tlsf_block_is_free(block) || original_size < TLSF_MIN_BLOCK_SIZE ||
+			(original_size & (TLSF_ALIGN_SIZE - 1U)) != 0U || (char *)block + original_size > heap_end) {
 		htExitCritical();
 		return;
 	}
 
 	/*
 	 * 物理前驱一致性检查：真实块的 prev_phys_block 要么是 NULL（堆内首块），
-	 * 要么满足 prev + size(prev) == block。堆内的野指针（任务栈或数据缓冲区
-	 * 里的随机字节）几乎不可能满足该不变式，于是在进入空闲链表之前就被拒绝；
-	 * 否则这些字节会被当成块头插进空闲链表，下一次 malloc 就把活跃内存发出去。
+	 * 要么按块对齐、完整块头位于堆内，且满足 prev + size(prev) == block。
 	 */
 	const block_header_t *prev = block->prev_phys_block;
 	if (prev == NULL) {
@@ -1052,7 +964,8 @@ void htPortFree(void *ptr)
 			htExitCritical();
 			return;
 		}
-	} else if (!tlsf_block_within_heap(prev) ||
+	} else if (((uintptr_t)prev & (TLSF_ALIGN_SIZE - 1U)) != 0U || (const char *)prev < heap_start ||
+			   (const char *)prev + TLSF_MIN_BLOCK_SIZE > heap_end ||
 			   (char *)tlsf_offset_to_block(prev, tlsf_block_size(prev)) != (char *)block) {
 		htExitCritical();
 		return;
@@ -1119,7 +1032,7 @@ size_t htGetMinimumEverFreeHeapSize(void)
  */
 size_t htGetTotalHeapSize(void)
 {
-	return configTOTAL_HEAP_SIZE;
+	return (size_t)configTOTAL_HEAP_SIZE;
 }
 
 #else /* configTOTAL_HEAP_SIZE == 0：纯静态分配配置 */

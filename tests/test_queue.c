@@ -26,6 +26,7 @@
 #include "htqueue.h"
 #include "htscheduler.h"
 #include "htsemaphore.h"
+#include "htkernel_internal.h"
 
 /** 当前任务指针：内核 API 靠它判断调用者身份，用例按需赋值。 */
 /* ------------------------------------------------------------------ */
@@ -44,6 +45,7 @@ static htList_t overflow_delayed_task_list;
 htList_t *pxDelayedTaskList = &delayed_task_list;
 /** 内核使用的延时溢出链表指针。 */
 htList_t *pxOverflowDelayedTaskList = &overflow_delayed_task_list;
+TickType_t xNextTaskUnblockTime = (TickType_t)htBLOCKED_INDEFINITELY;
 /** 临界区嵌套计数：内核退出临界区时会读它，桩函数必须如实维护。 */
 volatile UBaseType_t uxCriticalNesting = 0U;
 
@@ -55,6 +57,10 @@ static size_t free_count;
 static size_t fail_allocation_at;
 /** 每次主动让出推进的节拍数，0 表示只让出、不推进时间。 */
 static TickType_t ticks_advanced_on_yield;
+/** 记录 htTaskYield() 调用次数，用于验证抢占式唤醒。 */
+static UBaseType_t yield_count;
+/** 记录中断临界区嵌套次数，验证 FromISR 临界区配对。 */
+static UBaseType_t isr_critical_nesting;
 
 /**
  * @brief 替换内核的动态分配：统计次数，并可注入分配失败。
@@ -112,6 +118,35 @@ void htExitCritical(void)
 	}
 }
 
+UBaseType_t htEnterCriticalFromISR(void)
+{
+	isr_critical_nesting++;
+	return isr_critical_nesting;
+}
+
+void htExitCriticalFromISR(UBaseType_t uxSavedInterruptStatus)
+{
+	(void)uxSavedInterruptStatus;
+	if (isr_critical_nesting > 0U) {
+		isr_critical_nesting--;
+	}
+}
+
+void htSchedNotifyTaskEnqueued(htTCB_t *pxTask)
+{
+	(void)pxTask;
+}
+
+void htSchedRecordReadyPriority(UBaseType_t uxPriority)
+{
+	(void)uxPriority;
+}
+
+void htSchedClearReadyPriorityIfEmpty(UBaseType_t uxPriority)
+{
+	(void)uxPriority;
+}
+
 /**
  * @brief 模拟关中断，与 htEnterCritical() 共用同一个嵌套计数。
  *
@@ -145,6 +180,7 @@ void __enable_irq(void)
  */
 void htTaskYield(void)
 {
+	yield_count++;
 	if (pxCurrentTCB == NULL || ticks_advanced_on_yield == 0U) {
 		return;
 	}
@@ -157,23 +193,17 @@ void htTaskYield(void)
 	htListInsertEnd(&(pxReadyTasksLists[pxCurrentTCB->uxPriority]), &(pxCurrentTCB->xStateListItem));
 }
 
-/**
- * @brief 把内核全局量、链表与桩计数器恢复成干净状态。
- *
- * @note 每个用例开头都必须调用：清空堆计数、临界区计数、节拍与当前任务，
- *       并重新初始化全部就绪链表和两条延时链表，防止用例之间互相污染。
- */
-/* ------------------------------------------------------------------ */
-/* 3. 测试辅助函数                                                    */
-/* ------------------------------------------------------------------ */
 static void reset_test_state(void)
 {
 	allocation_count = 0U;
 	free_count = 0U;
 	fail_allocation_at = 0U;
 	ticks_advanced_on_yield = 0U;
+	yield_count = 0U;
+	isr_critical_nesting = 0U;
 	uxCriticalNesting = 0U;
 	xTickCount = 0U;
+	xNextTaskUnblockTime = (TickType_t)htBLOCKED_INDEFINITELY;
 	pxCurrentTCB = NULL;
 	htListInit(pxDelayedTaskList);
 	htListInit(pxOverflowDelayedTaskList);
@@ -335,48 +365,36 @@ static void test_recursive_mutex_tracks_owner_depth_and_release(void)
 	reset_test_state();
 	htTCB_t owner = {0};
 	SemaphoreHandle_t mutex = htSemaphoreCreateRecursiveMutex();
-	htMutexHolder_t holder = {0};
 
 	TEST_ASSERT_NOT_NULL(mutex);
+	TEST_ASSERT_EQUAL(1U, htSemaphoreGetCount(mutex));
 	initialise_current_task(&owner, 2U);
 
 	TEST_ASSERT_EQUAL(htPASS, htSemaphoreTakeRecursive(mutex, 0U));
-	TEST_ASSERT_EQUAL(htPASS, htQueuePeek(mutex, &holder, 0U));
-	TEST_ASSERT(holder.xTaskHandle == &owner);
-	TEST_ASSERT_EQUAL(1, holder.uxRecursiveCallCount);
+	TEST_ASSERT(htSemaphoreGetMutexHolder(mutex) == &owner);
+	TEST_ASSERT_EQUAL(1, mutex->u.xMutex.uxRecursiveCallCount);
+	TEST_ASSERT_EQUAL(0U, htSemaphoreGetCount(mutex));
 
 	TEST_ASSERT_EQUAL(htPASS, htSemaphoreTakeRecursive(mutex, 0U));
-	TEST_ASSERT_EQUAL(htPASS, htQueuePeek(mutex, &holder, 0U));
-	TEST_ASSERT_EQUAL(2, holder.uxRecursiveCallCount);
+	TEST_ASSERT_EQUAL(2, mutex->u.xMutex.uxRecursiveCallCount);
 
 	TEST_ASSERT_EQUAL(htPASS, htSemaphoreGiveRecursive(mutex));
-	TEST_ASSERT_EQUAL(htPASS, htQueuePeek(mutex, &holder, 0U));
-	TEST_ASSERT_EQUAL(1, holder.uxRecursiveCallCount);
-	TEST_ASSERT(holder.xTaskHandle == &owner);
+	TEST_ASSERT_EQUAL(1, mutex->u.xMutex.uxRecursiveCallCount);
+	TEST_ASSERT(htSemaphoreGetMutexHolder(mutex) == &owner);
 
 	TEST_ASSERT_EQUAL(htPASS, htSemaphoreGiveRecursive(mutex));
-	TEST_ASSERT_EQUAL(htPASS, htQueuePeek(mutex, &holder, 0U));
-	TEST_ASSERT_EQUAL(0, holder.uxRecursiveCallCount);
-	TEST_ASSERT_NULL(holder.xTaskHandle);
+	TEST_ASSERT_EQUAL(0, mutex->u.xMutex.uxRecursiveCallCount);
+	TEST_ASSERT_NULL(htSemaphoreGetMutexHolder(mutex));
+	TEST_ASSERT_EQUAL(1U, htSemaphoreGetCount(mutex));
 	htSemaphoreDelete(mutex);
 }
 
-/**
- * @brief 递归互斥量被更高优先级任务竞争时抬升持有者优先级，释放后再还原。
- *
- * 断言点：优先级 3 的任务以 2 个节拍的有限等待 take 失败（走超时路径），
- * 节拍正好推进 2；持有者的 uxPriority 与 uxBasePriority 在等待期间被抬到 3、
- * 释放后回到 0；内部 uxOriginalPriority 在完全释放后回到 UINT32_MAX 哨兵值。
- * @note ticks_advanced_on_yield = 2 让 htTaskYield() 桩推进 xTickCount，
- *       用来验证有限等待返回前确实消耗了超时时间，而不是立即返回。
- */
 static void test_recursive_mutex_inherits_priority_and_restores_after_release(void)
 {
 	reset_test_state();
 	htTCB_t owner = {0};
 	htTCB_t waiter = {0};
 	SemaphoreHandle_t mutex = htSemaphoreCreateRecursiveMutex();
-	htMutexHolder_t holder = {0};
 
 	TEST_ASSERT_NOT_NULL(mutex);
 	initialise_current_task(&owner, 0U);
@@ -399,8 +417,7 @@ static void test_recursive_mutex_inherits_priority_and_restores_after_release(vo
 	TEST_ASSERT_EQUAL(0U, owner.uxPriority);
 
 	pxCurrentTCB = &owner;
-	TEST_ASSERT_EQUAL(htPASS, htQueuePeek(mutex, &holder, 0U));
-	TEST_ASSERT_EQUAL(UINT32_MAX, holder.uxOriginalPriority);
+	TEST_ASSERT_EQUAL(UINT32_MAX, mutex->u.xMutex.uxOriginalPriority);
 	TEST_ASSERT_EQUAL(htPASS, htSemaphoreGiveRecursive(mutex));
 	TEST_ASSERT_EQUAL(0U, owner.uxPriority);
 	htSemaphoreDelete(mutex);
@@ -1072,14 +1089,107 @@ static void test_queue_set_static_create_uses_caller_memory(void)
 }
 
 /**
- * @brief 运行本套件的全部用例并返回失败计数。
- *
- * @return 失败的用例数，0 表示全部通过。
- * @note 新增用例必须同时在这里登记 RUN_TEST()，否则不会被运行。
+ * @brief P0 回归：递归互斥量在被持有期间重入、竞争失败或误释放不得虚假唤醒等待者。
  */
-/* ------------------------------------------------------------------ */
-/* 5. 测试入口                                                        */
-/* ------------------------------------------------------------------ */
+static void test_recursive_mutex_no_spurious_wakeup_while_held(void)
+{
+	reset_test_state();
+	htQUEUE_t mutex_buf = {0};
+	htTCB_t owner = {0};
+	htTCB_t waiter_h1 = {0};
+	htTCB_t contender_h2 = {0};
+
+	SemaphoreHandle_t mutex = htSemaphoreCreateRecursiveMutexStatic(&mutex_buf);
+	TEST_ASSERT_NOT_NULL(mutex);
+	TEST_ASSERT_EQUAL(0U, allocation_count);
+
+	initialise_current_task(&owner, 1U);
+	TEST_ASSERT_EQUAL(htPASS, htSemaphoreTakeRecursive(mutex, 0U));
+
+	/* 模拟 H1 已阻塞在递归互斥量上。 */
+	block_task_on(&(mutex->xTasksWaitingToReceive), &waiter_h1, 4U);
+
+	/* 1) owner 递归重入不得唤醒 H1。 */
+	TEST_ASSERT_EQUAL(htPASS, htSemaphoreTakeRecursive(mutex, 0U));
+	TEST_ASSERT_EQUAL(HT_TASK_BLOCKED, waiter_h1.uxTaskState);
+	TEST_ASSERT(waiter_h1.xEventListItem.pxContainer == &(mutex->xTasksWaitingToReceive));
+
+	/* 2) H2 try-take 失败或非持有者误调 GiveRecursive 不得唤醒 H1。 */
+	initialise_current_task(&contender_h2, 4U);
+	TEST_ASSERT_EQUAL(htFAIL, htSemaphoreTakeRecursive(mutex, 0U));
+	TEST_ASSERT_EQUAL(htFAIL, htSemaphoreGiveRecursive(mutex));
+	TEST_ASSERT_EQUAL(HT_TASK_BLOCKED, waiter_h1.uxTaskState);
+
+	/* 3) H2 阻塞超时后，因为 H1(prio 4) 仍在等，owner 仍保留继承优先级，且 H1 仍阻塞。 */
+	ticks_advanced_on_yield = 3U;
+	TEST_ASSERT_EQUAL(htFAIL, htSemaphoreTakeRecursive(mutex, 3U));
+	TEST_ASSERT_EQUAL(HT_TASK_BLOCKED, waiter_h1.uxTaskState);
+	TEST_ASSERT_EQUAL(4U, owner.uxPriority);
+
+	/* 4) owner 逐层释放：第一层不解锁不唤醒，第二层解锁后唤醒 H1 并触发 yield。 */
+	pxCurrentTCB = &owner;
+	yield_count = 0U;
+	TEST_ASSERT_EQUAL(htPASS, htSemaphoreGiveRecursive(mutex));
+	TEST_ASSERT_EQUAL(HT_TASK_BLOCKED, waiter_h1.uxTaskState);
+	TEST_ASSERT_EQUAL(0U, yield_count);
+
+	TEST_ASSERT_EQUAL(htPASS, htSemaphoreGiveRecursive(mutex));
+	TEST_ASSERT_EQUAL(HT_TASK_READY, waiter_h1.uxTaskState);
+	TEST_ASSERT_EQUAL(1U, owner.uxPriority);
+	TEST_ASSERT_EQUAL(1U, yield_count);
+	TEST_ASSERT_EQUAL(0U, uxCriticalNesting);
+	htSemaphoreDelete(mutex);
+}
+
+/**
+ * @brief P0 回归：队列 send/receive/overwrite 唤醒更高优先级任务必须立即触发抢占，且 overwrite 通知队列集。
+ */
+static void test_queue_preemption_and_overwrite_queue_set(void)
+{
+	reset_test_state();
+	QueueHandle_t queue = htQueueCreate(1U, sizeof(int));
+	QueueSetHandle_t set = htQueueSetCreate(2U);
+	htTCB_t low_task = {0};
+	htTCB_t high_receiver = {0};
+	htTCB_t high_sender = {0};
+	int value = 99;
+	int out = 0;
+
+	TEST_ASSERT_NOT_NULL(queue);
+	TEST_ASSERT_NOT_NULL(set);
+	TEST_ASSERT_EQUAL(htPASS, htQueueAddToSet(queue, set));
+
+	initialise_current_task(&low_task, 1U);
+	block_task_on(&(queue->xTasksWaitingToReceive), &high_receiver, 4U);
+
+	/* Overwrite 空队列：唤醒高优先级接收者 + 触发 yield + 向队列集投令牌。 */
+	yield_count = 0U;
+	TEST_ASSERT_EQUAL(htPASS, htQueueOverwrite(queue, &value));
+	TEST_ASSERT_EQUAL(1U, yield_count);
+	TEST_ASSERT_EQUAL(HT_TASK_READY, high_receiver.uxTaskState);
+	TEST_ASSERT(queue == htQueueSelectFromSet(set, 0U));
+
+	/* Receive 腾出空位：唤醒高优先级发送者 + 触发 yield。 */
+	block_task_on(&(queue->xTasksWaitingToSend), &high_sender, 4U);
+	yield_count = 0U;
+	TEST_ASSERT_EQUAL(htPASS, htQueueReceive(queue, &out, 0U));
+	TEST_ASSERT_EQUAL(value, out);
+	TEST_ASSERT_EQUAL(1U, yield_count);
+	TEST_ASSERT_EQUAL(HT_TASK_READY, high_sender.uxTaskState);
+
+	/* Send 唤醒高优先级接收者 + 触发 yield。 */
+	block_task_on(&(queue->xTasksWaitingToReceive), &high_receiver, 4U);
+	yield_count = 0U;
+	TEST_ASSERT_EQUAL(htPASS, htQueueSend(queue, &value, 0U));
+	TEST_ASSERT_EQUAL(1U, yield_count);
+	TEST_ASSERT_EQUAL(0U, uxCriticalNesting);
+	TEST_ASSERT_EQUAL(0U, isr_critical_nesting);
+
+	TEST_ASSERT_EQUAL(htPASS, htQueueRemoveFromSet(queue, set));
+	htQueueDelete(queue);
+	htQueueDelete(set);
+}
+
 int main(void)
 {
 	UnityBegin("test_queue.c");
@@ -1109,5 +1219,7 @@ int main(void)
 	RUN_TEST(test_queue_set_refuses_to_delete_live_participants);
 	RUN_TEST(test_queue_set_accepts_a_semaphore_member);
 	RUN_TEST(test_queue_set_static_create_uses_caller_memory);
+	RUN_TEST(test_recursive_mutex_no_spurious_wakeup_while_held);
+	RUN_TEST(test_queue_preemption_and_overwrite_queue_set);
 	return UnityEnd();
 }

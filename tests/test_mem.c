@@ -350,16 +350,17 @@ static void test_allocator_coalesces_adjacent_blocks(void)
 	}
 	TEST_ASSERT(count > 8U);
 
-	/* 连续申请的四个块在物理上相邻：单独释放任何一个都只有 16 字节，
-	   四个合并后才够 malloc(100)，因此成功即证明合并生效。 */
-	for (size_t i = 0U; i < 4U; i++) {
+	/* 连续申请的五个块在物理上相邻：块头复用后每块 16 B 仅占 24 B（32 位）/ 32 B（64 位），
+	   单独释放任何一个都只有 16 字节，五个合并后（120 B / 160 B）才够 malloc(100)，
+	   因此成功即证明相邻合并生效。 */
+	for (size_t i = 0U; i < 5U; i++) {
 		htPortFree(blocks[i]);
 	}
 	void *big = htPortMalloc(100U);
 	TEST_ASSERT_NOT_NULL(big);
 	htPortFree(big);
 
-	for (size_t i = 4U; i < count; i++) {
+	for (size_t i = 5U; i < count; i++) {
 		htPortFree(blocks[i]);
 	}
 	TEST_ASSERT_EQUAL(base, htGetFreeHeapSize());
@@ -493,6 +494,37 @@ static void test_allocator_tracks_peak_usage(void)
 }
 
 /**
+ * @brief 分裂已释放前块后，其物理后继块仍须可正常释放并回并（验证 prev_phys_block 重连）。
+ */
+static void test_allocator_relinks_successor_after_split(void)
+{
+	htMemInit();
+	const size_t base = htGetFreeHeapSize();
+
+	/* 8 字节 AAPCS 对齐 + 空闲指针与负载复用（头部开销小于完整 block_header_t）。 */
+	TEST_ASSERT_EQUAL(8U, TLSF_ALIGN_SIZE);
+	TEST_ASSERT(TLSF_BLOCK_START_OFFSET < sizeof(block_header_t));
+
+	void *first = htPortMalloc(128U);
+	void *second = htPortMalloc(64U);
+	void *guard = htPortMalloc(32U);
+	TEST_ASSERT_NOT_NULL(first);
+	TEST_ASSERT_NOT_NULL(second);
+	TEST_ASSERT_NOT_NULL(guard);
+
+	/* 释放第一块后，从其内部切出小块触发 tlsf_block_split()，再释放紧邻的 second。 */
+	htPortFree(first);
+	void *small = htPortMalloc(16U);
+	TEST_ASSERT_NOT_NULL(small);
+
+	htPortFree(second);
+	htPortFree(small);
+	htPortFree(guard);
+	TEST_ASSERT_EQUAL(base, htGetFreeHeapSize());
+	TEST_ASSERT_EQUAL(0, uxCriticalNesting);
+}
+
+/**
  * @brief 套件入口：注册并顺序执行本文件全部用例。
  *
  * @return UnityEnd() 的返回值，即失败的用例数；0 表示全部通过。
@@ -516,5 +548,6 @@ int main(void)
 	RUN_TEST(test_allocator_survives_random_churn);
 	RUN_TEST(test_allocator_rejects_forged_interior_header);
 	RUN_TEST(test_allocator_tracks_peak_usage);
+	RUN_TEST(test_allocator_relinks_successor_after_split);
 	return UnityEnd();
 }

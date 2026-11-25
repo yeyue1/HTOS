@@ -66,6 +66,8 @@
 
 /** @brief 输出一个字符串字面量，长度在编译期可得，不需要 strlen。 */
 #define APP_PUTS(text) board_console_write((text), (uint32_t)(sizeof(text) - 1U))
+/** @brief 应急/故障路径输出字面量：绕过 HAL 锁直写串口寄存器。 */
+#define APP_PANIC_PUTS(text) board_console_write_panic((text), (uint32_t)(sizeof(text) - 1U))
 
 /* 上电自检错误码，由日志任务以 "last_err" 报出。 */
 #define APP_ERR_NONE 0U
@@ -220,33 +222,53 @@ static char *prv_hex(char *cursor, uint32_t value)
  * @param[in] value 待输出的数值。
  * @param[in] suffix 行尾字符串，通常是 CRLF。
  */
-static void prv_report_hex(const char *key, uint32_t value, const char *suffix)
+static void prv_panic_report(const char *key, uint32_t value, const char *suffix)
 {
-	char line[48]; /* 键名不超过 16 字节，加 8 位十六进制与 CRLF 远小于 48 */
+	char line[96];
+	char *cursor = line;
+
+	cursor = prv_str(cursor, key);
+	cursor = prv_u32(cursor, value);
+	cursor = prv_str(cursor, suffix);
+
+	board_console_write_panic(line, (uint32_t)(cursor - line));
+}
+
+static void prv_panic_report_hex(const char *key, uint32_t value, const char *suffix)
+{
+	char line[48];
 	char *cursor = line;
 
 	cursor = prv_str(cursor, key);
 	cursor = prv_hex(cursor, value);
 	cursor = prv_str(cursor, suffix);
 
-	board_console_write(line, (uint32_t)(cursor - line));
+	board_console_write_panic(line, (uint32_t)(cursor - line));
 }
 
 #if (configUSE_LATENCY_STATS == 1)
 /**
  * @brief 把"总周期数 / 样本数"换算成平均微秒，样本数为 0 时返回 0。
  *
- * @param[in] ulTotalCycles 累计周期数。
- * @param[in] ulCount       样本个数。
+ * @param[in] ullTotalCycles 累计周期数（64 位防溢出）。
+ * @param[in] ulCount        样本个数。
  * @return 平均耗时，四舍五入到微秒。
  */
-static uint32_t prv_average_us(uint32_t ulTotalCycles, uint32_t ulCount)
+static uint32_t prv_average_us(uint64_t ullTotalCycles, uint32_t ulCount)
 {
 	if (ulCount == 0U) {
 		return 0U;
 	}
 
-	return htLatencyCyclesToUs(ulTotalCycles / ulCount);
+	/* 等比右移至 32 位再做单指令 UDIV，避免链接 libgcc 的 __udivmoddi4（节省 ~754 B Flash）。 */
+	while (ullTotalCycles > (uint64_t)UINT32_MAX) {
+		ullTotalCycles >>= 1U;
+		ulCount >>= 1U;
+		if (ulCount == 0U) {
+			return htLatencyCyclesToUs(UINT32_MAX);
+		}
+	}
+	return htLatencyCyclesToUs((uint32_t)ullTotalCycles / ulCount);
 }
 #endif
 
@@ -293,38 +315,38 @@ void htTraceValue(const char *pcTag, uint32_t ulValue)
  */
 void htFaultReport(const htFaultFrame_t *pxFrame)
 {
-	APP_PUTS("\r\n[HARDFAULT] ");
-	prv_report_hex("SP=0x", pxFrame->ulStackPointer, "\r\n");
+	APP_PANIC_PUTS("\r\n[HARDFAULT] ");
+	prv_panic_report_hex("SP=0x", pxFrame->ulStackPointer, "\r\n");
 
-	prv_report_hex(" PC=0x", pxFrame->ulCore[6], "\r\n");
-	prv_report_hex(" LR=0x", pxFrame->ulCore[5], "\r\n");
-	prv_report_hex("PSR=0x", pxFrame->ulCore[7], "\r\n");
-	prv_report_hex(" R0=0x", pxFrame->ulCore[0], "\r\n");
-	prv_report_hex(" R1=0x", pxFrame->ulCore[1], "\r\n");
-	prv_report_hex(" R2=0x", pxFrame->ulCore[2], "\r\n");
-	prv_report_hex(" R3=0x", pxFrame->ulCore[3], "\r\n");
-	prv_report_hex("R12=0x", pxFrame->ulCore[4], "\r\n");
-	prv_report_hex("CFSR=0x", pxFrame->ulCfsr, "\r\n");
-	prv_report_hex("HFSR=0x", pxFrame->ulHfsr, "\r\n");
-	prv_report_hex("DFSR=0x", pxFrame->ulDfsr, "\r\n");
-	prv_report_hex("AFSR=0x", pxFrame->ulAfsr, "\r\n");
-	prv_report_hex("BFAR=0x", pxFrame->ulBfar, "\r\n");
-	prv_report_hex("MMAR=0x", pxFrame->ulMmfar, "\r\n");
+	prv_panic_report_hex(" PC=0x", pxFrame->ulCore[6], "\r\n");
+	prv_panic_report_hex(" LR=0x", pxFrame->ulCore[5], "\r\n");
+	prv_panic_report_hex("PSR=0x", pxFrame->ulCore[7], "\r\n");
+	prv_panic_report_hex(" R0=0x", pxFrame->ulCore[0], "\r\n");
+	prv_panic_report_hex(" R1=0x", pxFrame->ulCore[1], "\r\n");
+	prv_panic_report_hex(" R2=0x", pxFrame->ulCore[2], "\r\n");
+	prv_panic_report_hex(" R3=0x", pxFrame->ulCore[3], "\r\n");
+	prv_panic_report_hex("R12=0x", pxFrame->ulCore[4], "\r\n");
+	prv_panic_report_hex("CFSR=0x", pxFrame->ulCfsr, "\r\n");
+	prv_panic_report_hex("HFSR=0x", pxFrame->ulHfsr, "\r\n");
+	prv_panic_report_hex("DFSR=0x", pxFrame->ulDfsr, "\r\n");
+	prv_panic_report_hex("AFSR=0x", pxFrame->ulAfsr, "\r\n");
+	prv_panic_report_hex("BFAR=0x", pxFrame->ulBfar, "\r\n");
+	prv_panic_report_hex("MMAR=0x", pxFrame->ulMmfar, "\r\n");
 
 	if ((pxFrame->ulFaultFlags & HT_FAULT_FLAG_NOCP) != 0U) {
-		APP_PUTS("- coprocessor access error\r\n");
+		APP_PANIC_PUTS("- coprocessor access error\r\n");
 	}
 	if ((pxFrame->ulFaultFlags & HT_FAULT_FLAG_INVPC) != 0U) {
-		APP_PUTS("- invalid PC load (EXC_RETURN)\r\n");
+		APP_PANIC_PUTS("- invalid PC load (EXC_RETURN)\r\n");
 	}
 	if ((pxFrame->ulFaultFlags & HT_FAULT_FLAG_INVSTATE) != 0U) {
-		APP_PUTS("- invalid state, Thumb bit cleared\r\n");
+		APP_PANIC_PUTS("- invalid state, Thumb bit cleared\r\n");
 	}
 	if ((pxFrame->ulFaultFlags & HT_FAULT_FLAG_UNDEFINSTR) != 0U) {
-		APP_PUTS("- undefined instruction\r\n");
+		APP_PANIC_PUTS("- undefined instruction\r\n");
 	}
 
-	APP_PUTS("[fault] halted\r\n");
+	APP_PANIC_PUTS("[fault] halted\r\n");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -431,8 +453,8 @@ static void prv_logger_task(void *param)
 			cursor = prv_u32(cursor, htLatencyCyclesToUs(xSnapshot.ulCriticalMaxCycles));
 			cursor = prv_str(cursor, "us caller=0x");
 			cursor = prv_hex(cursor, xSnapshot.ulCriticalCaller);
-			cursor = prv_str(cursor, "us avg=");
-			cursor = prv_u32(cursor, prv_average_us(xSnapshot.ulCriticalTotalCycles, xSnapshot.ulCriticalCount));
+			cursor = prv_str(cursor, " avg=");
+			cursor = prv_u32(cursor, prv_average_us(xSnapshot.ullCriticalTotalCycles, xSnapshot.ulCriticalCount));
 			cursor = prv_str(cursor, "us n=");
 			cursor = prv_u32(cursor, xSnapshot.ulCriticalCount);
 			cursor = prv_str(cursor, " over64=");
@@ -440,7 +462,7 @@ static void prv_logger_task(void *param)
 			cursor = prv_str(cursor, " tick max=");
 			cursor = prv_u32(cursor, htLatencyCyclesToUs(xSnapshot.ulTickMaxCycles));
 			cursor = prv_str(cursor, "us avg=");
-			cursor = prv_u32(cursor, prv_average_us(xSnapshot.ulTickTotalCycles, xSnapshot.ulTickCount));
+			cursor = prv_u32(cursor, prv_average_us(xSnapshot.ullTickTotalCycles, xSnapshot.ulTickCount));
 			cursor = prv_str(cursor, "us\r\n");
 
 			board_console_write(line, (uint32_t)(cursor - line));
@@ -478,10 +500,10 @@ static void prv_monitor_task(void *param)
  */
 static void prv_fatal(const char *reason, uint32_t code)
 {
-	APP_PUTS("\r\n[fatal] ");
-	board_console_write(reason, prv_strlen(reason));
-	prv_report(" code=", code, "\r\n");
-	APP_PUTS("[fatal] halted - attach a debugger and inspect s_last_error\r\n");
+	APP_PANIC_PUTS("\r\n[fatal] ");
+	board_console_write_panic(reason, prv_strlen(reason));
+	prv_panic_report(" code=", code, "\r\n");
+	APP_PANIC_PUTS("[fatal] halted - attach a debugger and inspect s_last_error\r\n");
 
 	/* 这里故意不调 HAL_Delay()：很可能出问题的正是时基本身。 */
 	for (;;) {

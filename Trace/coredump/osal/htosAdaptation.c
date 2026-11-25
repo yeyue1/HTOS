@@ -11,6 +11,7 @@
 #include "../arch/mcd_arch_interface.h"
 #include "../inc/coredump.h"
 #include "httask.h"
+#include "htkernel_internal.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>

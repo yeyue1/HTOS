@@ -37,11 +37,11 @@ typedef struct {
 	uint32_t ulCriticalMaxCycles; /**< 观测到的最长临界区耗时。 */
 	uint32_t ulCriticalCaller; /**< 该次临界区的 htEnterCritical() 返回地址。 */
 	uint32_t ulCriticalCount; /**< 采样到的临界区次数（只统计最外层）。 */
-	uint32_t ulCriticalTotalCycles; /**< 全部临界区耗时之和。 */
+	uint64_t ullCriticalTotalCycles; /**< 全部临界区耗时之和（64 位防长时运行溢出）。 */
 	uint32_t aulCriticalBuckets[HT_LATENCY_BUCKET_COUNT]; /**< 按耗时档累计的次数。 */
 	uint32_t ulTickMaxCycles; /**< 观测到的最长滴答中断耗时。 */
 	uint32_t ulTickCount; /**< 采样到的滴答中断次数。 */
-	uint32_t ulTickTotalCycles; /**< 全部滴答中断耗时之和。 */
+	uint64_t ullTickTotalCycles; /**< 全部滴答中断耗时之和（64 位防长时运行溢出）。 */
 } htLatencySnapshot_t;
 
 /**

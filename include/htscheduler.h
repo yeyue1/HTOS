@@ -30,14 +30,14 @@ void htSchedulerInit(void);
 void htStartScheduler(void);
 
 /**
- * @brief 暂停调度器，滴答中断不再引发任务切换。
- * @note 只切换调度器状态，不改变中断优先级；用于调试或临界性极高的代码段。
+ * @brief 暂停调度器（支持嵌套计数），滴答中断与主动让出均只登记待补请求而不切换。
+ * @note 与 htResumeScheduler() 严格配对使用；计数归零且期间存在切换请求时自动补切。
  */
 void htSuspendScheduler(void);
 
 /**
- * @brief 恢复被暂停的调度器。
- * @note 与 htSuspendScheduler() 配对使用，恢复后正常参与调度。
+ * @brief 恢复被暂停的调度器（嵌套计数减一）。
+ * @note 当最外层恢复且挂起期间曾产生上下文切换请求时，自动调用 htTaskYield() 补发切换。
  */
 void htResumeScheduler(void);
 
@@ -52,7 +52,7 @@ void htSchedulerTickHandler(void);
  * @brief 调度器是否已经启动过。
  *
  * @return 已启动（运行中或已挂起）返回 htTRUE，从未启动返回 htFALSE。
- * @note 调度策略只允许在启动之前替换，本函数就是用来做这个判断的。
+ * @note 策略切换与任务创建路径据此决定是否需要立即请求一次重调度。
  */
 BaseType_t htSchedulerIsStarted(void);
 
@@ -72,6 +72,22 @@ void htEnterCritical(void);
  * @note 支持嵌套：只有最外层退出（计数减到 0）才执行开中断。
  */
 void htExitCritical(void);
+
+/**
+ * @brief 中断上下文进入临界区：保存当前中断屏蔽状态并屏蔽受管中断。
+ *
+ * @return 保存的中断屏蔽快照，退出时原样传回 htExitCriticalFromISR()。
+ * @note 防止 Cortex-M 高优先级中断抢占正在操作内核链表的低优先级中断；
+ *       不修改任务侧的 uxCriticalNesting。
+ */
+UBaseType_t htEnterCriticalFromISR(void);
+
+/**
+ * @brief 中断上下文退出临界区：按保存值恢复中断屏蔽状态。
+ *
+ * @param[in] uxSavedInterruptStatus 由配对的 htEnterCriticalFromISR() 返回的值。
+ */
+void htExitCriticalFromISR(UBaseType_t uxSavedInterruptStatus);
 
 /** @brief 临界区嵌套计数器，0 表示当前不在临界区。 */
 extern volatile UBaseType_t uxCriticalNesting;

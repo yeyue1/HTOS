@@ -11,6 +11,8 @@
 #include "httask.h"
 #include "htmem.h"
 #include "htscheduler.h"
+#include "htschedpolicy.h"
+#include "htkernel_internal.h"
 
 /**
  * @brief 初始化一块已分配的队列结构，动态创建与静态创建共用。
@@ -31,23 +33,17 @@ static BaseType_t prvInitialiseNewQueue(UBaseType_t uxQueueLength, UBaseType_t u
 	if (pxNewQueue != NULL && (pcQueueStorage != NULL || uxItemSize == 0U)) {
 		memset(pxNewQueue, 0, sizeof(*pxNewQueue));
 		pxNewQueue->pcHead = pcQueueStorage;
-		/* 逐个初始化队列成员：深度、项宽、写指针、消息计数与收发锁计数。 */
 		pxNewQueue->uxLength = uxQueueLength;
 		pxNewQueue->uxItemSize = uxItemSize;
 		pxNewQueue->pcWriteTo = pxNewQueue->pcHead;
-		pxNewQueue->uxMessagesWaiting = 0;
-		pxNewQueue->cRxLock = htQUEUE_UNLOCKED;
-		pxNewQueue->cTxLock = htQUEUE_UNLOCKED;
+		pxNewQueue->uxMessagesWaiting = 0U;
 		pxNewQueue->ucStaticallyAllocated = ucStaticallyAllocated;
+		pxNewQueue->ucQueueType = htQUEUE_TYPE_BASE;
 
-		/* 按 uxItemSize 是否为 0 区分队列与信号量两种形态。 */
-		if (uxItemSize > 0) {
-			/* 队列形态：pcTail 指向存储区末尾之后，读写指针都从头部开始。 */
-			pxNewQueue->u.xQueue.pcTail = pxNewQueue->pcHead + (uxQueueLength * uxItemSize);
+		/* 数据队列形态初始化读写指针；信号量形态直接使用 uxMessagesWaiting 计数。 */
+		if (uxItemSize > 0U) {
+			pxNewQueue->u.xQueue.pcTail = pxNewQueue->pcHead + ((size_t)uxQueueLength * (size_t)uxItemSize);
 			pxNewQueue->u.xQueue.pcReadFrom = pxNewQueue->pcHead;
-		} else {
-			/* 信号量形态：初始计数为 0。 */
-			pxNewQueue->u.xSemaphore.uxSemaphoreCount = 0;
 		}
 
 		/* 两张等待链表：因队列满而阻塞的发送者、因队列空而阻塞的接收者各一张。 */
@@ -85,7 +81,7 @@ QueueHandle_t htQueueCreate(UBaseType_t uxQueueLength, UBaseType_t uxItemSize)
 
 	if (pxNewQueue != NULL) {
 		if (uxItemSize != 0U) {
-			pcQueueStorage = (int8_t *)htPortMalloc(uxQueueLength * uxItemSize);
+			pcQueueStorage = (int8_t *)htPortMalloc((size_t)uxQueueLength * (size_t)uxItemSize);
 		}
 		if (prvInitialiseNewQueue(uxQueueLength, uxItemSize, pcQueueStorage, pxNewQueue, 0U) != htPASS) {
 			htPortFree(pcQueueStorage);
@@ -142,10 +138,7 @@ QueueHandle_t htQueueCreateStatic(
  */
 static void prvCopyDataToQueue(htQUEUE_t *pxQueue, const void *pvItemToQueue)
 {
-	if (pxQueue->uxItemSize == 0) {
-		/* 信号量形态：只把计数加一。 */
-		pxQueue->u.xSemaphore.uxSemaphoreCount++;
-	} else {
+	if (pxQueue->uxItemSize > 0U) {
 		/* 队列形态：按 uxItemSize 把消息拷到写指针处。 */
 		memcpy((void *)pxQueue->pcWriteTo, pvItemToQueue, pxQueue->uxItemSize);
 
@@ -156,7 +149,7 @@ static void prvCopyDataToQueue(htQUEUE_t *pxQueue, const void *pvItemToQueue)
 		}
 	}
 
-	/* 消息计数加一。 */
+	/* 消息/信号量计数统一由 uxMessagesWaiting 维护。 */
 	pxQueue->uxMessagesWaiting++;
 }
 
@@ -167,11 +160,10 @@ static void prvCopyDataToQueue(htQUEUE_t *pxQueue, const void *pvItemToQueue)
  * @param[out] pvBuffer 接收缓冲区；信号量形态下不使用。
  *
  * @note 读指针越过 pcTail 后同样绕回 pcHead。
- * @note 消息计数在这里减一；信号量形态下已先减过计数值。
  */
 static void prvCopyDataFromQueue(htQUEUE_t *pxQueue, void *pvBuffer)
 {
-	if (pxQueue->uxItemSize != 0) {
+	if (pxQueue->uxItemSize != 0U) {
 		/* 队列形态：按 uxItemSize 拷到调用者提供的缓冲区。 */
 		memcpy(pvBuffer, (void *)pxQueue->u.xQueue.pcReadFrom, pxQueue->uxItemSize);
 
@@ -180,11 +172,9 @@ static void prvCopyDataFromQueue(htQUEUE_t *pxQueue, void *pvBuffer)
 		if (pxQueue->u.xQueue.pcReadFrom >= pxQueue->u.xQueue.pcTail) {
 			pxQueue->u.xQueue.pcReadFrom = pxQueue->pcHead;
 		}
-	} else if (pxQueue->u.xSemaphore.uxSemaphoreCount > 0U) {
-		pxQueue->u.xSemaphore.uxSemaphoreCount--;
 	}
 
-	/* 消息计数减一。 */
+	/* 消息/信号量计数减一。 */
 	pxQueue->uxMessagesWaiting--;
 }
 
@@ -211,6 +201,7 @@ static BaseType_t prvBlockCurrentTask(htList_t *pxEventList, TickType_t xTicksTo
 
 	/* 先把任务从就绪链表与延时链表中摘出来，避免它同时挂在两处。 */
 	htListRemove(&(pxCurrentTCB->xStateListItem));
+	htSchedClearReadyPriorityIfEmpty(pxCurrentTCB->uxPriority);
 	htListRemove(&(pxCurrentTCB->xEventListItem));
 
 	/* 事件项值取优先级取反：高优先级任务排在链表前部，唤醒时取表头即可。 */
@@ -223,6 +214,9 @@ static BaseType_t prvBlockCurrentTask(htList_t *pxEventList, TickType_t xTicksTo
 		htListSetItemValue(&(pxCurrentTCB->xStateListItem), xTimeToWake);
 		if (xTimeToWake > xTickCount) {
 			htListInsert(pxDelayedTaskList, &(pxCurrentTCB->xStateListItem));
+			if (xTimeToWake < xNextTaskUnblockTime) {
+				xNextTaskUnblockTime = xTimeToWake;
+			}
 		} else {
 			htListInsert(pxOverflowDelayedTaskList, &(pxCurrentTCB->xStateListItem));
 		}
@@ -261,24 +255,12 @@ static htTCB_t *prvUnblockFirstTask(htList_t *pxEventList)
 	htListSetItemValue(&(pxTCB->xStateListItem), configMAX_PRIORITIES - pxTCB->uxPriority);
 	pxTCB->uxTaskState = HT_TASK_READY;
 	htListInsertEnd(&(pxReadyTasksLists[pxTCB->uxPriority]), &(pxTCB->xStateListItem));
+	htSchedRecordReadyPriority(pxTCB->uxPriority);
+	htSchedNotifyTaskEnqueued(pxTCB);
 	return pxTCB;
 }
 
 #if (configUSE_QUEUE_SETS == 1)
-/**
- * @brief 成员入队成功后，把"我有数据"的令牌投进它所属的队列集。
- *
- * @param[in,out] pxQueue 刚刚成功入队的成员队列。
- *
- * @return 若本次投递唤醒了阻塞在集合上的任务，返回该任务的控制块；否则返回 NULL。
- *
- * @warning 必须在持有内核临界区时调用，本函数自己不再关中断。
- * @note 集合已满时令牌被丢弃而不是阻塞：发送方在中断里也可能走到这里，不能阻塞。
- *       这也是"集合容量必须不小于成员长度之和"这条使用约束的由来——容量足够时
- *       永远不会丢令牌，容量不足时 htQueueSelectFromSet() 可能漏掉已有的数据。
- * @note 令牌只在成员成功入队时产生，因此"取走成员数据"不会产生令牌；集合回答的是
- *       "哪个成员曾经有数据"，取数据仍要自己对该成员调用 htQueueReceive()。
- */
 static htTCB_t *prvQueueSetNotify(htQUEUE_t *pxQueue)
 {
 	htQUEUE_t *pxSet = pxQueue->pxQueueSetContainer;
@@ -287,7 +269,7 @@ static htTCB_t *prvQueueSetNotify(htQUEUE_t *pxQueue)
 	/* 不是成员、或恰好是集合自己（集合不会再进别的集合）都直接跳过。 */
 	if (pxSet != NULL && pxSet != pxQueue && pxSet->uxMessagesWaiting < pxSet->uxLength) {
 		QueueSetMemberHandle_t xMember = pxQueue;
-		prvCopyDataToQueue(pxSet, &xMember);
+		prvCopyDataToQueue(pxSet, (const void *)&xMember);
 		pxUnblocked = prvUnblockFirstTask(&(pxSet->xTasksWaitingToReceive));
 	}
 
@@ -296,17 +278,20 @@ static htTCB_t *prvQueueSetNotify(htQUEUE_t *pxQueue)
 #endif /* configUSE_QUEUE_SETS */
 
 /**
- * @brief 向队列发送一条消息；队列满时可限时阻塞等待。
- *
- * @param[in] xQueue 目标队列句柄。
- * @param[in] pvItemToQueue 待发送消息的地址；信号量形态下可为 NULL。
- * @param[in] xTicksToWait 队列满时的最长等待 tick 数，0 表示不等待。
- *
- * @return 发送成功返回 htPASS；超时或参数错误返回 htFAIL。
- *
- * @note 每轮都用 htTaskYield() 主动让出 CPU，并用 xElapsed 重算剩余等待
- *       时间，避免被虚假唤醒后多等。
+ * @brief 判断被唤醒任务是否应立即触发抢占式切换。
  */
+static BaseType_t prvShouldYieldForUnblocked(const htTCB_t *pxUnblocked)
+{
+#if (configUSE_PREEMPTION == 1)
+	if (pxUnblocked != NULL && pxCurrentTCB != NULL && pxUnblocked->uxPriority > pxCurrentTCB->uxPriority) {
+		return htTRUE;
+	}
+#else
+	(void)pxUnblocked;
+#endif
+	return htFALSE;
+}
+
 BaseType_t htQueueSend(QueueHandle_t xQueue, const void *pvItemToQueue, TickType_t xTicksToWait)
 {
 	htQUEUE_t *pxQueue = (htQUEUE_t *)xQueue;
@@ -322,13 +307,21 @@ BaseType_t htQueueSend(QueueHandle_t xQueue, const void *pvItemToQueue, TickType
 		htEnterCritical();
 		/* 队列未满：拷入消息，再从等待接收链表中唤醒一个任务。 */
 		if (pxQueue->uxMessagesWaiting < pxQueue->uxLength) {
+			BaseType_t xYieldRequired = htFALSE;
 			prvCopyDataToQueue(pxQueue, pvItemToQueue);
 #if (configUSE_QUEUE_SETS == 1)
 			/* 成员入队后先给集合投令牌，再唤醒本队列的接收者。 */
-			(void)prvQueueSetNotify(pxQueue);
+			if (prvShouldYieldForUnblocked(prvQueueSetNotify(pxQueue)) == htTRUE) {
+				xYieldRequired = htTRUE;
+			}
 #endif
-			(void)prvUnblockFirstTask(&(pxQueue->xTasksWaitingToReceive));
+			if (prvShouldYieldForUnblocked(prvUnblockFirstTask(&(pxQueue->xTasksWaitingToReceive))) == htTRUE) {
+				xYieldRequired = htTRUE;
+			}
 			htExitCritical();
+			if (xYieldRequired == htTRUE) {
+				htTaskYield();
+			}
 			return htPASS;
 		}
 
@@ -350,17 +343,6 @@ BaseType_t htQueueSend(QueueHandle_t xQueue, const void *pvItemToQueue, TickType
 	}
 }
 
-/**
- * @brief 从队列接收一条消息；队列空时可限时阻塞等待。
- *
- * @param[in] xQueue 源队列句柄。
- * @param[out] pvBuffer 接收缓冲区地址；信号量形态下可为 NULL。
- * @param[in] xTicksToWait 队列空时的最长等待 tick 数，0 表示不等待。
- *
- * @return 接收成功返回 htPASS；超时或参数错误返回 htFAIL。
- *
- * @note 取走消息后会尝试唤醒一个因队列满而阻塞的发送者。
- */
 BaseType_t htQueueReceive(QueueHandle_t xQueue, void *pvBuffer, TickType_t xTicksToWait)
 {
 	htQUEUE_t *pxQueue = (htQUEUE_t *)xQueue;
@@ -376,8 +358,12 @@ BaseType_t htQueueReceive(QueueHandle_t xQueue, void *pvBuffer, TickType_t xTick
 		/* 有消息：拷出并唤醒一个因队列满而阻塞的发送者。 */
 		if (pxQueue->uxMessagesWaiting > 0U) {
 			prvCopyDataFromQueue(pxQueue, pvBuffer);
-			(void)prvUnblockFirstTask(&(pxQueue->xTasksWaitingToSend));
+			const BaseType_t xYieldRequired =
+					prvShouldYieldForUnblocked(prvUnblockFirstTask(&(pxQueue->xTasksWaitingToSend)));
 			htExitCritical();
+			if (xYieldRequired == htTRUE) {
+				htTaskYield();
+			}
 			return htPASS;
 		}
 
@@ -400,18 +386,6 @@ BaseType_t htQueueReceive(QueueHandle_t xQueue, void *pvBuffer, TickType_t xTick
 	}
 }
 
-/**
- * @brief 在中断服务程序中向队列发送消息，不阻塞。
- *
- * @param[in] xQueue 目标队列句柄。
- * @param[in] pvItemToQueue 待发送消息的地址；信号量形态下可为 NULL。
- * @param[out] pxHigherPriorityTaskWoken 若唤醒了更高优先级任务则置 htTRUE，
- *             供中断退出前决定是否请求一次 PendSV 切换；可为 NULL。
- *
- * @return 入队成功返回 htPASS；队列满或参数错误返回 htFAIL。
- *
- * @warning 只能在中断上下文调用；本函数不进入临界区，靠中断屏蔽保证互斥。
- */
 BaseType_t htQueueSendFromISR(QueueHandle_t xQueue, const void *pvItemToQueue, BaseType_t *pxHigherPriorityTaskWoken)
 {
 	BaseType_t xReturn = htFAIL;
@@ -426,6 +400,9 @@ BaseType_t htQueueSendFromISR(QueueHandle_t xQueue, const void *pvItemToQueue, B
 	if (pxHigherPriorityTaskWoken != NULL) {
 		*pxHigherPriorityTaskWoken = htFALSE;
 	}
+
+	/* 保护中断嵌套：高优先级 ISR 可能抢占低优先级 ISR 并发访问同一队列。 */
+	const UBaseType_t uxSavedStatus = htEnterCriticalFromISR();
 
 	/* 还有空位才能入队；ISR 中不做任何等待。 */
 	if (pxQueue->uxMessagesWaiting < pxQueue->uxLength) {
@@ -454,20 +431,10 @@ BaseType_t htQueueSendFromISR(QueueHandle_t xQueue, const void *pvItemToQueue, B
 		xReturn = htPASS;
 	}
 
+	htExitCriticalFromISR(uxSavedStatus);
 	return xReturn;
 }
 
-/**
- * @brief 在中断服务程序中从队列接收一条消息，不阻塞。
- *
- * @param[in] xQueue 源队列句柄。
- * @param[out] pvBuffer 接收缓冲区地址；信号量形态下可为 NULL。
- * @param[out] pxHigherPriorityTaskWoken 若唤醒了更高优先级任务则置 htTRUE；可为 NULL。
- *
- * @return 取到消息返回 htPASS；队列空或参数错误返回 htFAIL。
- *
- * @warning 只能在中断上下文调用，不会阻塞。
- */
 BaseType_t htQueueReceiveFromISR(QueueHandle_t xQueue, void *pvBuffer, BaseType_t *pxHigherPriorityTaskWoken)
 {
 	BaseType_t xReturn = htFAIL;
@@ -483,8 +450,10 @@ BaseType_t htQueueReceiveFromISR(QueueHandle_t xQueue, void *pvBuffer, BaseType_
 		*pxHigherPriorityTaskWoken = htFALSE;
 	}
 
+	const UBaseType_t uxSavedStatus = htEnterCriticalFromISR();
+
 	/* 只有队列里确实有消息才能取走。 */
-	if (pxQueue->uxMessagesWaiting > 0) {
+	if (pxQueue->uxMessagesWaiting > 0U) {
 		/* 拷出消息，并尝试唤醒一个因队列满而阻塞的发送者。 */
 		prvCopyDataFromQueue(pxQueue, pvBuffer);
 
@@ -498,6 +467,7 @@ BaseType_t htQueueReceiveFromISR(QueueHandle_t xQueue, void *pvBuffer, BaseType_
 		xReturn = htPASS;
 	}
 
+	htExitCriticalFromISR(uxSavedStatus);
 	return xReturn;
 }
 
@@ -561,6 +531,8 @@ UBaseType_t htQueueSpacesAvailable(QueueHandle_t xQueue)
 BaseType_t htQueueOverwrite(QueueHandle_t xQueue, const void *pvItemToQueue)
 {
 	htQUEUE_t *pxQueue = (htQUEUE_t *)xQueue;
+	BaseType_t xYieldRequired = htFALSE;
+
 	if (pxQueue == NULL || pvItemToQueue == NULL || pxQueue->uxLength != 1U || pxQueue->uxItemSize == 0U) {
 		return htFAIL;
 	}
@@ -568,13 +540,24 @@ BaseType_t htQueueOverwrite(QueueHandle_t xQueue, const void *pvItemToQueue)
 	htEnterCritical();
 	if (pxQueue->uxMessagesWaiting == 0U) {
 		prvCopyDataToQueue(pxQueue, pvItemToQueue);
-		(void)prvUnblockFirstTask(&(pxQueue->xTasksWaitingToReceive));
+#if (configUSE_QUEUE_SETS == 1)
+		if (prvShouldYieldForUnblocked(prvQueueSetNotify(pxQueue)) == htTRUE) {
+			xYieldRequired = htTRUE;
+		}
+#endif
+		if (prvShouldYieldForUnblocked(prvUnblockFirstTask(&(pxQueue->xTasksWaitingToReceive))) == htTRUE) {
+			xYieldRequired = htTRUE;
+		}
 	} else {
 		memcpy(pxQueue->pcHead, pvItemToQueue, pxQueue->uxItemSize);
 		pxQueue->pcWriteTo = pxQueue->pcHead;
 		pxQueue->u.xQueue.pcReadFrom = pxQueue->pcHead;
 	}
 	htExitCritical();
+
+	if (xYieldRequired == htTRUE) {
+		htTaskYield();
+	}
 	return htPASS;
 }
 
@@ -597,16 +580,11 @@ BaseType_t htQueueReset(QueueHandle_t xQueue)
 
 	htEnterCritical();
 
-	/* 复位消息计数、读写指针与接收/发送锁计数。 */
-	pxQueue->uxMessagesWaiting = 0;
+	/* 复位消息计数；仅数据队列形态才重置读指针，避免覆盖 union 内的递归互斥量状态。 */
+	pxQueue->uxMessagesWaiting = 0U;
 	pxQueue->pcWriteTo = pxQueue->pcHead;
-	pxQueue->u.xQueue.pcReadFrom = pxQueue->pcHead;
-	pxQueue->cRxLock = htQUEUE_UNLOCKED;
-	pxQueue->cTxLock = htQUEUE_UNLOCKED;
-
-	/* 信号量形态：计数一并清零。 */
-	if (pxQueue->uxItemSize == 0) {
-		pxQueue->u.xSemaphore.uxSemaphoreCount = 0;
+	if (pxQueue->uxItemSize > 0U) {
+		pxQueue->u.xQueue.pcReadFrom = pxQueue->pcHead;
 	}
 
 	htExitCritical();
@@ -799,7 +777,8 @@ BaseType_t htQueueAddToSet(QueueSetMemberHandle_t xQueueOrSemaphore, QueueSetHan
 	}
 
 	htEnterCritical();
-	if ((pxSet->ucIsQueueSet != 0U) && (pxMember->ucIsQueueSet == 0U) && (pxMember->pxQueueSetContainer == NULL) &&
+	if ((pxSet->ucIsQueueSet != 0U) && (pxMember->ucIsQueueSet == 0U) &&
+			(pxMember->ucQueueType != htQUEUE_TYPE_RECURSIVE_MUTEX) && (pxMember->pxQueueSetContainer == NULL) &&
 			(pxMember->uxMessagesWaiting == 0U)) {
 		pxMember->pxQueueSetContainer = pxSet;
 		pxSet->uxQueueSetMembers++;
@@ -863,7 +842,7 @@ QueueSetMemberHandle_t htQueueSelectFromSet(QueueSetHandle_t xQueueSet, TickType
 		return NULL;
 	}
 
-	if (htQueueReceive(pxSet, &xMember, xTicksToWait) != htPASS) {
+	if (htQueueReceive(pxSet, (void *)&xMember, xTicksToWait) != htPASS) {
 		return NULL;
 	}
 
@@ -888,7 +867,7 @@ QueueSetMemberHandle_t htQueueSelectFromSetFromISR(QueueSetHandle_t xQueueSet)
 		return NULL;
 	}
 
-	if (htQueueReceiveFromISR(pxSet, &xMember, NULL) != htPASS) {
+	if (htQueueReceiveFromISR(pxSet, (void *)&xMember, NULL) != htPASS) {
 		return NULL;
 	}
 

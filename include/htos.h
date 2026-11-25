@@ -17,9 +17,6 @@
 /** @brief 信号量句柄与信号量接口。 */
 #include "htsemaphore.h"
 
-/** @brief 系统时基计数类型，单位为 tick。 */
-typedef uint32_t TickType_t;
-
 /**
  * @brief 初始化操作系统内核。
  *

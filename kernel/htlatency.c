@@ -12,9 +12,7 @@
 
 #include "htlatency.h"
 #include "htscheduler.h"
-
-/* 设备头：真机上由 CMSIS 提供 IRQn_Type 与 __NVIC_PRIO_BITS，主机上由 tests/stubs 转发。 */
-#include "stm32f1xx.h"
+#include "htPort.h"
 
 #include <string.h>
 
@@ -75,10 +73,7 @@ void htLatencyInit(void)
 		return;
 	}
 
-	/* 写 DWT 之前必须打开跟踪总开关，否则所有写入都会被硬件忽略。 */
-	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-	DWT->CYCCNT = 0UL;
-	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+	htPortCycleCounterInit();
 	s_ucLatencyReady = 1U;
 }
 
@@ -92,7 +87,7 @@ void htLatencyCriticalEnter(uint32_t ulCaller)
 		return;
 	}
 
-	s_ulCriticalStart = DWT->CYCCNT;
+	s_ulCriticalStart = htPortCycleCounterRead();
 	s_ulPendingCaller = ulCaller;
 }
 
@@ -105,10 +100,10 @@ void htLatencyCriticalExit(void)
 		return;
 	}
 
-	ulElapsed = DWT->CYCCNT - s_ulCriticalStart;
+	ulElapsed = htPortCycleCounterRead() - s_ulCriticalStart;
 
 	s_xStats.ulCriticalCount++;
-	s_xStats.ulCriticalTotalCycles += ulElapsed;
+	s_xStats.ullCriticalTotalCycles += (uint64_t)ulElapsed;
 	if (ulElapsed > s_xStats.ulCriticalMaxCycles) {
 		s_xStats.ulCriticalMaxCycles = ulElapsed;
 		s_xStats.ulCriticalCaller = s_ulPendingCaller; /* 只记峰值那次的调用点 */
@@ -122,7 +117,7 @@ void htLatencyTickBegin(void)
 		return;
 	}
 
-	s_ulTickStart = DWT->CYCCNT;
+	s_ulTickStart = htPortCycleCounterRead();
 }
 
 void htLatencyTickEnd(void)
@@ -133,10 +128,10 @@ void htLatencyTickEnd(void)
 		return;
 	}
 
-	ulElapsed = DWT->CYCCNT - s_ulTickStart;
+	ulElapsed = htPortCycleCounterRead() - s_ulTickStart;
 
 	s_xStats.ulTickCount++;
-	s_xStats.ulTickTotalCycles += ulElapsed;
+	s_xStats.ullTickTotalCycles += (uint64_t)ulElapsed;
 	if (ulElapsed > s_xStats.ulTickMaxCycles) {
 		s_xStats.ulTickMaxCycles = ulElapsed;
 	}
@@ -144,33 +139,28 @@ void htLatencyTickEnd(void)
 
 void htLatencyGetSnapshot(htLatencySnapshot_t *pxSnapshot)
 {
-	uint32_t ulPrimask;
+	uint32_t ulSaved;
 
 	if (pxSnapshot == NULL) {
 		return;
 	}
 
-	/*
-	 * 这里刻意不用 htEnterCritical()：那会改动 uxCriticalNesting，
-	 * 而本模块正是靠这个计数判断"最外层"。用 PRIMASK 原语关一下即可。
-	 */
-	ulPrimask = __get_PRIMASK();
-	__disable_irq();
+	/* 不走 htEnterCritical()，以免改动 uxCriticalNesting 导致仪表统计自身。 */
+	ulSaved = htPortEnterAtomicRaw();
 	*pxSnapshot = s_xStats;
-	__set_PRIMASK(ulPrimask);
+	htPortExitAtomicRaw(ulSaved);
 }
 
 void htLatencyReset(void)
 {
-	uint32_t ulPrimask;
+	uint32_t ulSaved;
 
-	ulPrimask = __get_PRIMASK();
-	__disable_irq();
+	ulSaved = htPortEnterAtomicRaw();
 	(void)memset(&s_xStats, 0, sizeof(s_xStats));
 	s_ulCriticalStart = 0U;
 	s_ulPendingCaller = 0U;
 	s_ulTickStart = 0U;
-	__set_PRIMASK(ulPrimask);
+	htPortExitAtomicRaw(ulSaved);
 }
 
 uint32_t htLatencyCyclesToUs(uint32_t ulCycles)

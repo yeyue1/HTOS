@@ -18,7 +18,6 @@
 #include "htutils.h"
 #include "htlatency.h"
 #include "httrace.h"
-#include "stm32f1xx.h"
 
 /** 主版本号。 */
 #define HT_OS_VERSION_MAJOR 0

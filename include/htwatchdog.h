@@ -17,7 +17,7 @@ BaseType_t htWatchdogRegister(TaskHandle_t xTask);
 BaseType_t htWatchdogUnregister(TaskHandle_t xTask);
 /** 当前任务上报一次进度；仅注册任务可上报。 */
 BaseType_t htWatchdogHeartbeat(void);
-/** 首次调用建立基线并返回 htFAIL；漏报不推进快照。 */
+/** 首次调用建立基线并返回 htFALSE；全体心跳前进返回 htTRUE，漏报不推进快照。 */
 BaseType_t htWatchdogCheck(void);
 /** 清空注册表，供内核初始化及测试使用。 */
 void htWatchdogReset(void);

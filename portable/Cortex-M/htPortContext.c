@@ -16,9 +16,6 @@
 
 #include "htPort.h"
 #include "httask.h"
-/* 设备头文件定义 IRQn_Type 与 SCB，并顺带把 CMSIS 内核头文件拉进来。 */
-#include HT_PORT_DEVICE_HEADER
-#include HT_PORT_CORE_HEADER
 
 #include <stdint.h>
 
@@ -28,6 +25,65 @@
 
 #define HT_PORT_STRINGIFY_IMPL(value) #value
 #define HT_PORT_STRINGIFY(value) HT_PORT_STRINGIFY_IMPL(value)
+
+#if (configUSE_BASEPRI_CRITICAL == 1)
+#if (__NVIC_PRIO_BITS != 4U)
+#error "PendSV inline assembly BASEPRI immediate assumes __NVIC_PRIO_BITS == 4"
+#endif
+#define HT_PORT_PENDSV_MASK_IRQS                                                                                       \
+	"movs r0, #" HT_PORT_STRINGIFY(configMAX_SYSCALL_INTERRUPT_PRIORITY) "\n"                                          \
+																		 "lsls r0, r0, #4\n"                           \
+																		 "msr basepri, r0\n"                           \
+																		 "dsb\n"                                       \
+																		 "isb\n"
+#define HT_PORT_PENDSV_UNMASK_IRQS                                                                                     \
+	"movs r0, #0\n"                                                                                                    \
+	"msr basepri, r0\n"
+#else
+#define HT_PORT_PENDSV_MASK_IRQS "cpsid i\n"
+#define HT_PORT_PENDSV_UNMASK_IRQS "cpsie i\n"
+#endif
+
+/**
+ * @brief 任务函数非法返回后的兜底停机点。
+ */
+static void prvPortTaskExitTrap(void)
+{
+	htPortDisableAllInterrupts();
+	for (;;) {
+	}
+}
+
+/**
+ * @brief 构造 Cortex-M3 任务初始异常帧与软件保存寄存器帧（R4-R11）。
+ */
+StackType_t *htPortInitialiseStack(StackType_t *pxTopOfStack, htPortTaskCode_t pxCode, void *pvParameters)
+{
+	/* Cortex-M 异常入口要求栈顶 8 字节对齐。 */
+	pxTopOfStack = (StackType_t *)((uintptr_t)pxTopOfStack & ~(uintptr_t)0x7U);
+
+	/* 硬件异常返回帧：xPSR(T=1)、PC(bit0=0)、LR、R12、R3-R0。 */
+	*(--pxTopOfStack) = 0x01000000U;
+	*(--pxTopOfStack) = ((uint32_t)(uintptr_t)pxCode) & ~(uint32_t)0x1U;
+	*(--pxTopOfStack) = (uint32_t)(uintptr_t)prvPortTaskExitTrap;
+	*(--pxTopOfStack) = 0U; /* R12 */
+	*(--pxTopOfStack) = 0U; /* R3 */
+	*(--pxTopOfStack) = 0U; /* R2 */
+	*(--pxTopOfStack) = 0U; /* R1 */
+	*(--pxTopOfStack) = (uint32_t)(uintptr_t)pvParameters; /* R0 */
+
+	/* 软件保存帧：R11-R4，与 PendSV_Handler 的 stmdb/ldmia 对应。 */
+	*(--pxTopOfStack) = 0U; /* R11 */
+	*(--pxTopOfStack) = 0U; /* R10 */
+	*(--pxTopOfStack) = 0U; /* R9 */
+	*(--pxTopOfStack) = 0U; /* R8 */
+	*(--pxTopOfStack) = 0U; /* R7 */
+	*(--pxTopOfStack) = 0U; /* R6 */
+	*(--pxTopOfStack) = 0U; /* R5 */
+	*(--pxTopOfStack) = 0U; /* R4 */
+
+	return pxTopOfStack;
+}
 
 #if HT_PORT_VALIDATE_STACK
 #define HT_PORT_STACK_CHECK_R0                                                                                         \
@@ -138,9 +194,7 @@ __attribute__((naked, used, noinline)) void SVC_Handler(void)
 __attribute__((naked, used, noinline)) void PendSV_Handler(void)
 {
 	__asm volatile(".syntax unified\n"
-				   ".thumb\n"
-				   "cpsid i\n"
-				   "mrs r0, psp\n"
+				   ".thumb\n" HT_PORT_PENDSV_MASK_IRQS "mrs r0, psp\n"
 				   "ldr r3, =pxCurrentTCB\n"
 				   "ldr r2, [r3]\n"
 				   "cbz r2, 1f\n"
@@ -155,24 +209,17 @@ __attribute__((naked, used, noinline)) void PendSV_Handler(void)
 				   "bl htTaskSwitchContext\n"
 				   "pop {r3, lr}\n"
 				   "ldr r1, [r3]\n"
-				   "cbz r1, 2f\n"
+				   "cbz r1, 9f\n"
 				   "ldr r0, [r1]\n"
 #if HT_PORT_VALIDATE_STACK
 			HT_PORT_STACK_CHECK_R0
 #endif
 				   "ldmia r0!, {r4-r11}\n"
 				   "msr psp, r0\n"
-				   "movs r0, #2\n"
-				   "msr control, r0\n"
-				   "isb\n"
-				   "2:\n"
-				   "cpsie i\n"
-				   "movs r0, #0x0D\n"
+				   "2:\n" HT_PORT_PENDSV_UNMASK_IRQS "movs r0, #0x0D\n"
 				   "orr lr, lr, r0\n"
 				   "bx lr\n"
-				   "9:\n"
-				   "cpsie i\n"
-				   "bx lr\n"
+				   "9:\n" HT_PORT_PENDSV_UNMASK_IRQS "bx lr\n"
 #if HT_PORT_VALIDATE_STACK
 				   "PendSV_StackError:\n"
 				   "udf #0\n"

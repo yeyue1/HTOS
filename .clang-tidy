@@ -1,37 +1,35 @@
 ---
 Checks: >
-  *,
-  -llvmlibc-*,
-  -altera-*,
-  -fuchsia-*,
-  -android-*,
-  -darwin-*,
-  -zircon-*,
-  -abseil-*,
-  -boost-*,
-  -google-*,
-  -hicpp-*,
-  -modernize-*,
-  -readability-identifier-length,
-  -readability-magic-numbers,
-  -cppcoreguidelines-avoid-magic-numbers,
-  -cppcoreguidelines-init-variables,
-  -cert-dcl37-c,
-  -cert-dcl51-cpp,
+  clang-analyzer-*,
+  bugprone-*,
+  cert-*,
+  misc-*,
+  readability-*,
   -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
   -bugprone-easily-swappable-parameters,
-  -readability-function-cognitive-complexity,
+  -bugprone-narrowing-conversions,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -cert-dcl37-c,
+  -cert-err33-c,
+  -misc-include-cleaner,
   -misc-unused-parameters,
-  -readability-non-const-parameter
+  -misc-no-recursion,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -readability-non-const-parameter,
+  -readability-braces-around-statements,
+  -readability-isolate-declaration,
+  -readability-else-after-return,
+  -readability-uppercase-literal-suffix,
+  -readability-math-missing-parentheses
 
 WarningsAsErrors: ''
 
-HeaderFilterRegex: '.*'
+HeaderFilterRegex: '^(include|kernel|portable|board|app)/.*'
 
 CheckOptions:
   - key: readability-function-size.LineThreshold
     value: '200'
   - key: readability-function-size.StatementThreshold
     value: '150'
-  - key: misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic
-    value: '1'

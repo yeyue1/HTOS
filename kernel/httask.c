@@ -15,14 +15,15 @@
 #include "htlatency.h"
 #include "httrace.h"
 #include "htutils.h"
+#include "htPort.h"
+#include "htkernel_internal.h"
 #include <string.h>
-#include "stm32f1xx_hal.h"
-#include "core_cm3.h" /* 提供 NVIC 与 ICSR 等内核寄存器定义 */
 
 /* 全局变量 */
 htTCB_t *pxCurrentTCB = NULL; /* 当前运行的任务 TCB */
 UBaseType_t uxCurrentNumberOfTasks = 0; /* 当前任务数量 */
 TickType_t xTickCount = 0; /* 系统tick计数 */
+TickType_t xNextTaskUnblockTime = htBLOCKED_INDEFINITELY; /* 延时表头唤醒时刻缓存 */
 
 /* 任务就绪列表 */
 htList_t pxReadyTasksLists[configMAX_PRIORITIES];
@@ -35,15 +36,10 @@ htList_t *pxOverflowDelayedTaskList;
 static htList_t xSuspendedTaskList;
 /* 自删除任务必须由空闲任务在完成上下文切换后释放。 */
 static htList_t xTasksWaitingTermination;
+#if (configUSE_TRACE_FACILITY == 1)
 /* 所有任务链表：调试时可遍历全部在册任务。 */
 htList_t pxAllocatedTasksList;
-
-/**
- * @brief 从 htscheduler.c 导入的"是否需要切换"判定。
- *
- * @return 需要切换返回 htTRUE，否则返回 htFALSE。
- */
-extern BaseType_t htSchedulerNeedsSwitch(void);
+#endif
 
 /**
  * @brief 初始化全部任务链表：各优先级就绪链表、延时/溢出链表、挂起与终止链表。
@@ -51,83 +47,37 @@ extern BaseType_t htSchedulerNeedsSwitch(void);
  * @note 由 htSchedulerInit() 调用；去掉 static 只是为了让调度器初始化能调用
  *       它，并不属于对外 API。
  */
+static void prvResetNextTaskUnblockTime(void)
+{
+	htListItem_t *pxHead = (pxDelayedTaskList != NULL) ? htListGetHead(pxDelayedTaskList) : NULL;
+	xNextTaskUnblockTime = (pxHead != NULL) ? htListGetItemValue(pxHead) : htBLOCKED_INDEFINITELY;
+}
+
 void prvInitialiseTaskLists(void)
 {
 	UBaseType_t uxPriority;
 
-	/* 初始化所有任务就绪列表 */
+	/* 初始化所有任务就绪列表并清空 O(1) 优先级位图 */
 	for (uxPriority = 0; uxPriority < configMAX_PRIORITIES; uxPriority++) {
 		htListInit(&(pxReadyTasksLists[uxPriority]));
 	}
+	htSchedResetReadyBitmap();
 
 	/* 初始化延时任务列表 */
 	htListInit(&xDelayedTaskList1);
 	htListInit(&xDelayedTaskList2);
 	pxDelayedTaskList = &xDelayedTaskList1;
 	pxOverflowDelayedTaskList = &xDelayedTaskList2;
+	xNextTaskUnblockTime = htBLOCKED_INDEFINITELY;
 
 	/* 初始化挂起任务列表 */
 	htListInit(&xSuspendedTaskList);
 	htListInit(&xTasksWaitingTermination);
 
+#if (configUSE_TRACE_FACILITY == 1)
 	/* 初始化所有任务列表 */
 	htListInit(&pxAllocatedTasksList);
-}
-
-/**
- * @brief 任务函数返回后的最终归宿：永久停机。
- *
- * 任务函数禁止返回；一旦返回，bx lr 必须落到一条永久停机指令上。若把 LR 设为
- * 0xFFFFFFFE 这类非法地址，Cortex-M3 只会报 HardFault，CFSR 的 UFSR 段给出
- * 0x00040000（INVPC，非法 PC 装载），现象离原因很远，极难定位。
- */
-static void prvTaskExitTrap(void)
-{
-	__disable_irq();
-	for (;;) {
-	}
-}
-
-/**
- * @brief 在任务栈顶构造一个"异常返回帧"，让任务首次被调度时像从中断返回一样起跑。
- *
- * @param[in] pxTopOfStack 栈顶指针（由调用者给出，通常为 栈底 + 深度 - 1）。
- * @param[in] pxCode 任务入口函数。
- * @param[in] pvParameters 传给任务的唯一参数，异常返回时装进 R0。
- *
- * @return 压好帧之后的新栈顶，写入 htTCB_t.pxTopOfStack。
- *
- * @warning 栈顶必须先做 8 字节对齐；xPSR 的 T 位必须为 1，而 PC 槽的 bit0 必须为 0。
- */
-static StackType_t *prvInitialiseTaskStack(StackType_t *pxTopOfStack, TaskFunction_t pxCode, void *pvParameters)
-{
-	/* Cortex-M 异常入口要求栈顶 8 字节对齐；uintptr_t 同时兼容 64 位主机测试。 */
-	pxTopOfStack = (StackType_t *)((uintptr_t)pxTopOfStack & ~(uintptr_t)0x7U);
-
-	/* 先构造硬件异常返回帧（从高地址往低地址压）。 */
-	*(--pxTopOfStack) = 0x01000000; /* xPSR - T位置位 */
-	/* PC 槽由硬件异常返回装载：必须存偶数地址（bit0=0）。Thumb 状态由同一帧中
-	   xPSR 的 T 位给出，把 bit0 置 1 反而会让返回失败：Cortex-M3 报 INVPC
-	   （非法 PC 装载）。FreeRTOS 的 portSTART_ADDRESS_MASK 做的正是这件事。 */
-	*(--pxTopOfStack) = ((uint32_t)(uintptr_t)pxCode) & ~(uint32_t)0x1U;
-	*(--pxTopOfStack) = (uint32_t)(uintptr_t)prvTaskExitTrap; /* LR - 任务返回即停机 */
-	*(--pxTopOfStack) = 0; /* R12 */
-	*(--pxTopOfStack) = 0; /* R3 */
-	*(--pxTopOfStack) = 0; /* R2 */
-	*(--pxTopOfStack) = 0; /* R1 */
-	*(--pxTopOfStack) = (uint32_t)pvParameters; /* R0 - 任务参数 */
-
-	/* 再压入软件保存的 r4-r11，与 PendSV 里的 stmdb r0!,{r4-r11} 对应。 */
-	*(--pxTopOfStack) = 0; /* R11 */
-	*(--pxTopOfStack) = 0; /* R10 */
-	*(--pxTopOfStack) = 0; /* R9 */
-	*(--pxTopOfStack) = 0; /* R8 */
-	*(--pxTopOfStack) = 0; /* R7 */
-	*(--pxTopOfStack) = 0; /* R6 */
-	*(--pxTopOfStack) = 0; /* R5 */
-	*(--pxTopOfStack) = 0; /* R4 */
-
-	return pxTopOfStack;
+#endif
 }
 
 /**
@@ -175,32 +125,51 @@ static BaseType_t prvInitialiseNewTask(TaskFunction_t pxTaskCode, const char *pc
 	memcpy(pxNewTCB->pcTaskName, pcName, xNameLength);
 	pxNewTCB->pcTaskName[xNameLength] = '\0';
 
-	pxNewTCB->pxTopOfStack = prvInitialiseTaskStack(pxStack + usStackDepth - 1U, pxTaskCode, pvParameters);
+	pxNewTCB->pxTopOfStack = htPortInitialiseStack(pxStack + usStackDepth - 1U, pxTaskCode, pvParameters);
 
-	pxNewTCB->uxPriority = uxPriority;
-	pxNewTCB->uxBasePriority = uxPriority;
+	pxNewTCB->uxPriority = (uint8_t)uxPriority;
+	pxNewTCB->uxBasePriority = (uint8_t)uxPriority;
+#if (configUSE_TASK_NOTIFICATIONS == 1)
 	pxNewTCB->uxNotificationStatus = HT_NOTIFY_NOT_WAITING;
+#endif
 
-	/* 三个链表项：状态项挂就绪/延时链表，事件项挂等待链表，跟踪项挂全局链表。 */
+	/* 链表项初始化：状态项挂就绪/延时链表，事件项挂等待链表，跟踪项挂全局链表。 */
 	htListItemInit(&(pxNewTCB->xStateListItem));
 	htListItemInit(&(pxNewTCB->xEventListItem));
-	htListItemInit(&(pxNewTCB->xAllListItem));
 	htListSetItemOwner(&(pxNewTCB->xStateListItem), pxNewTCB);
 	htListSetItemOwner(&(pxNewTCB->xEventListItem), pxNewTCB);
-	htListSetItemOwner(&(pxNewTCB->xAllListItem), pxNewTCB);
 	htListSetItemValue(&(pxNewTCB->xStateListItem), configMAX_PRIORITIES - uxPriority);
+#if (configUSE_TRACE_FACILITY == 1)
+	htListItemInit(&(pxNewTCB->xAllListItem));
+	htListSetItemOwner(&(pxNewTCB->xAllListItem), pxNewTCB);
 	htListSetItemValue(&(pxNewTCB->xAllListItem), configMAX_PRIORITIES - uxPriority);
-	htListInsertEnd(&pxAllocatedTasksList, &(pxNewTCB->xAllListItem));
-
-	/* 初始为就绪态，直接挂到对应优先级的就绪链表尾部。 */
+#endif
 	pxNewTCB->uxTaskState = HT_TASK_READY;
+
+	/* 将新任务挂入全局总表与就绪表必须在临界区内完成，避免运行期建任务被中断撕裂链表。 */
+	BaseType_t xYieldRequired = htFALSE;
+	htEnterCritical();
+#if (configUSE_TRACE_FACILITY == 1)
+	htListInsertEnd(&pxAllocatedTasksList, &(pxNewTCB->xAllListItem));
+#endif
 	htListInsertEnd(&(pxReadyTasksLists[uxPriority]), &(pxNewTCB->xStateListItem));
+	htSchedRecordReadyPriority(uxPriority);
 	uxCurrentNumberOfTasks++;
 
 	/* 通知当前策略：新任务已经进入就绪表，策略可以初始化自己的私有字段。 */
 	htSchedNotifyTaskCreated(pxNewTCB);
 	if (pxCurrentTCB == NULL) {
 		pxCurrentTCB = pxNewTCB;
+	}
+#if (configUSE_PREEMPTION == 1)
+	else if (htSchedulerIsStarted() == htTRUE && pxNewTCB->uxPriority > pxCurrentTCB->uxPriority) {
+		xYieldRequired = htTRUE;
+	}
+#endif
+	htExitCritical();
+
+	if (xYieldRequired == htTRUE) {
+		htTaskYield();
 	}
 	return htPASS;
 }
@@ -481,55 +450,53 @@ void htTaskCheckStackSentinel(TaskHandle_t xTask)
 #endif /* configCHECK_FOR_STACK_OVERFLOW */
 
 /**
+ * @brief 将当前任务按绝对唤醒时刻挂入延时链表（调用方需持有临界区）。
+ */
+static BaseType_t prvInsertCurrentTaskIntoDelayedList(TickType_t xTimeToWake)
+{
+	if (pxDelayedTaskList == NULL || pxOverflowDelayedTaskList == NULL || pxCurrentTCB == NULL) {
+		return htFAIL;
+	}
+
+	if (pxCurrentTCB->xStateListItem.pxContainer != NULL) {
+		htListRemove(&(pxCurrentTCB->xStateListItem));
+		htSchedClearReadyPriorityIfEmpty(pxCurrentTCB->uxPriority);
+	}
+
+	htListSetItemValue(&(pxCurrentTCB->xStateListItem), xTimeToWake);
+	if (xTimeToWake > xTickCount) {
+		htListInsert(pxDelayedTaskList, &(pxCurrentTCB->xStateListItem));
+		if (xTimeToWake < xNextTaskUnblockTime) {
+			xNextTaskUnblockTime = xTimeToWake;
+		}
+	} else {
+		htListInsert(pxOverflowDelayedTaskList, &(pxCurrentTCB->xStateListItem));
+	}
+
+	pxCurrentTCB->uxTaskState = HT_TASK_BLOCKED;
+	return htPASS;
+}
+
+/**
  * @brief 相对延时：让当前任务阻塞指定 tick 数，到期后重新就绪。
  *
  * @param[in] xTicksToDelay 延时 tick 数；为 0 时只让出 CPU、不进入阻塞态。
- *
- * @note 这里用 __disable_irq()/__enable_irq() 直接开关中断，而不是可嵌套的
- *       htEnterCritical()，因此不能与临界区嵌套使用。
  */
 void htTaskDelay(TickType_t xTicksToDelay)
 {
 	/* 延时为 0：只让出 CPU，不进入阻塞态。 */
-	if (xTicksToDelay == 0) {
+	if (xTicksToDelay == 0U) {
 		htTaskYield();
 		return;
 	}
 
-	/* 关中断，保证"摘链表 + 挂延时链表"这一串操作是原子的。 */
-	__disable_irq();
+	htEnterCritical();
+	const BaseType_t xBlocked = prvInsertCurrentTaskIntoDelayedList(xTickCount + xTicksToDelay);
+	htExitCritical();
 
-	/* 防御：延时链表或当前任务尚未就绪时直接返回。 */
-	if (pxDelayedTaskList == NULL || pxCurrentTCB == NULL) {
-		__enable_irq();
-		return;
+	if (xBlocked == htPASS) {
+		htTaskYield();
 	}
-
-	/* 算出唤醒时刻；tick 回绕时下面的比较会把它归入溢出链表。 */
-	TickType_t xTimeToWake = xTickCount + xTicksToDelay;
-
-	/* 若当前任务还挂在就绪链表里，先摘出来。 */
-	if (pxCurrentTCB->xStateListItem.pxContainer) {
-		htListRemove(&(pxCurrentTCB->xStateListItem));
-	}
-
-	/* 把唤醒时刻写进状态项，按值升序插入延时链表。 */
-	htListSetItemValue(&(pxCurrentTCB->xStateListItem), xTimeToWake);
-
-	if (xTimeToWake > xTickCount) {
-		pxCurrentTCB->xStateListItem.pxContainer = pxDelayedTaskList;
-		htListInsert(pxDelayedTaskList, &(pxCurrentTCB->xStateListItem));
-	} else {
-		pxCurrentTCB->xStateListItem.pxContainer = pxOverflowDelayedTaskList;
-		htListInsert(pxOverflowDelayedTaskList, &(pxCurrentTCB->xStateListItem));
-	}
-
-	/* 标记为阻塞态。 */
-	pxCurrentTCB->uxTaskState = HT_TASK_BLOCKED;
-
-	/* 重新开中断，随后请求一次切换让出 CPU。 */
-	__enable_irq();
-	htTaskYield();
 }
 
 /**
@@ -540,23 +507,30 @@ void htTaskDelay(TickType_t xTicksToDelay)
  *
  * @return 正常进入延时返回 htPASS；已经错过唤醒时刻、无需等待时返回 htFAIL。
  *
- * @note 差值用 int32_t 计算，天然处理 tick 回绕；xTimeIncrement 超过 INT32_MAX
- *       会被拒绝，否则差值的符号位失去意义。
+ * @note 差值判定与绝对唤醒时刻入表在同一临界区内完成，消除读 xTickCount 后的 TOCTOU 漂移。
  */
 BaseType_t htTaskDelayUntil(TickType_t *pxPreviousWakeTime, TickType_t xTimeIncrement)
 {
-	if (pxPreviousWakeTime == NULL || xTimeIncrement == 0U || xTimeIncrement > INT32_MAX) {
+	if (pxPreviousWakeTime == NULL || xTimeIncrement == 0U || xTimeIncrement > (TickType_t)INT32_MAX) {
 		return htFAIL;
 	}
 
 	const TickType_t xNextWakeTime = *pxPreviousWakeTime + xTimeIncrement;
-	const int32_t xTicksRemaining = (int32_t)(xNextWakeTime - xTickCount);
 	*pxPreviousWakeTime = xNextWakeTime;
+
+	htEnterCritical();
+	const int32_t xTicksRemaining = (int32_t)(xNextWakeTime - xTickCount);
 	if (xTicksRemaining <= 0) {
+		htExitCritical();
 		return htFAIL;
 	}
+	const BaseType_t xBlocked = prvInsertCurrentTaskIntoDelayedList(xNextWakeTime);
+	htExitCritical();
 
-	htTaskDelay((TickType_t)xTicksRemaining);
+	if (xBlocked != htPASS) {
+		return htFAIL;
+	}
+	htTaskYield();
 	return htPASS;
 }
 
@@ -598,6 +572,7 @@ void htTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority)
 	if (uxOldPriority != uxNewPriority) {
 		if (pxTCB->uxTaskState == HT_TASK_READY || pxTCB->uxTaskState == HT_TASK_RUNNING) {
 			htListRemove(&(pxTCB->xStateListItem));
+			htSchedClearReadyPriorityIfEmpty(uxOldPriority);
 		}
 
 		/* 若正挂在某个事件等待链表上，先摘下来，稍后按新优先级重新插入。 */
@@ -606,15 +581,18 @@ void htTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority)
 			htListRemove(&(pxTCB->xEventListItem));
 		}
 
-		/* 更新优先级与基优先级，并同步三个链表项的值。 */
-		pxTCB->uxPriority = uxNewPriority;
-		pxTCB->uxBasePriority = uxNewPriority;
+		/* 更新优先级与基优先级，并同步链表项的值。 */
+		pxTCB->uxPriority = (uint8_t)uxNewPriority;
+		pxTCB->uxBasePriority = (uint8_t)uxNewPriority;
+#if (configUSE_TRACE_FACILITY == 1)
 		htListSetItemValue(&(pxTCB->xAllListItem), configMAX_PRIORITIES - uxNewPriority);
+#endif
 		htListSetItemValue(&(pxTCB->xEventListItem), configMAX_PRIORITIES - uxNewPriority);
 
 		if (pxTCB->uxTaskState == HT_TASK_READY || pxTCB->uxTaskState == HT_TASK_RUNNING) {
 			htListSetItemValue(&(pxTCB->xStateListItem), configMAX_PRIORITIES - uxNewPriority);
 			htListInsertEnd(&(pxReadyTasksLists[uxNewPriority]), &(pxTCB->xStateListItem));
+			htSchedRecordReadyPriority(uxNewPriority);
 		}
 		if (pxEventList != NULL) {
 			htListInsert(pxEventList, &(pxTCB->xEventListItem));
@@ -652,6 +630,7 @@ void htTaskSuspend(TaskHandle_t xTaskToSuspend)
 	const BaseType_t xSuspendCurrent = pxTCB == pxCurrentTCB ? htTRUE : htFALSE;
 	htEnterCritical();
 	htListRemove(&(pxTCB->xStateListItem));
+	htSchedClearReadyPriorityIfEmpty(pxTCB->uxPriority);
 	htListRemove(&(pxTCB->xEventListItem));
 	pxTCB->uxTaskState = HT_TASK_SUSPENDED;
 	htListSetItemValue(&(pxTCB->xStateListItem), 0U);
@@ -684,21 +663,15 @@ static BaseType_t prvResumeTask(htTCB_t *pxTCB)
 	htListSetItemValue(&(pxTCB->xStateListItem), configMAX_PRIORITIES - pxTCB->uxPriority);
 	pxTCB->uxTaskState = HT_TASK_READY;
 	htListInsertEnd(&(pxReadyTasksLists[pxTCB->uxPriority]), &(pxTCB->xStateListItem));
+	htSchedRecordReadyPriority(pxTCB->uxPriority);
+	htSchedNotifyTaskEnqueued(pxTCB);
 	/* 新任务优先级高于当前任务时才需要切换。 */
 	return pxCurrentTCB == NULL || pxTCB->uxPriority > pxCurrentTCB->uxPriority ? htTRUE : htFALSE;
 }
 
+#if (configUSE_TASK_NOTIFICATIONS == 1)
 /**
  * @brief 把任务阻塞在"等待任务通知"上，必要时同时挂入延时链表。
- *
- * @param[in,out] pxTCB 要阻塞的任务，通常是当前任务。
- * @param[in] xTicksToWait 最长等待 tick 数；htBLOCKED_INDEFINITELY 表示无限等待。
- *
- * @return 阻塞成功返回 htPASS；参数非法或延时链表未就绪返回 htFAIL。
- *
- * @warning 必须在临界区内调用。
- * @note 任务通知没有独立的事件链表，所以只动状态项，等待标志存放在
- *       uxNotificationStatus 里。
  */
 static BaseType_t prvBlockCurrentTaskOnNotification(htTCB_t *pxTCB, TickType_t xTicksToWait)
 {
@@ -710,6 +683,7 @@ static BaseType_t prvBlockCurrentTaskOnNotification(htTCB_t *pxTCB, TickType_t x
 	}
 
 	htListRemove(&(pxTCB->xStateListItem));
+	htSchedClearReadyPriorityIfEmpty(pxTCB->uxPriority);
 	htListRemove(&(pxTCB->xEventListItem));
 
 	if (xTicksToWait != htBLOCKED_INDEFINITELY) {
@@ -717,6 +691,9 @@ static BaseType_t prvBlockCurrentTaskOnNotification(htTCB_t *pxTCB, TickType_t x
 		htListSetItemValue(&(pxTCB->xStateListItem), xTimeToWake);
 		if (xTimeToWake > xTickCount) {
 			htListInsert(pxDelayedTaskList, &(pxTCB->xStateListItem));
+			if (xTimeToWake < xNextTaskUnblockTime) {
+				xNextTaskUnblockTime = xTimeToWake;
+			}
 		} else {
 			htListInsert(pxOverflowDelayedTaskList, &(pxTCB->xStateListItem));
 		}
@@ -729,12 +706,6 @@ static BaseType_t prvBlockCurrentTaskOnNotification(htTCB_t *pxTCB, TickType_t x
 
 /**
  * @brief 把因等待任务通知而阻塞的任务唤醒成就绪态。
- *
- * @param[in] pxTCB 目标任务。
- *
- * @return 需要立即切换返回 htTRUE；任务状态不符或参数非法返回 htFALSE。
- *
- * @warning 必须在临界区内调用。
  */
 static BaseType_t prvUnblockNotificationTask(htTCB_t *pxTCB)
 {
@@ -747,20 +718,13 @@ static BaseType_t prvUnblockNotificationTask(htTCB_t *pxTCB)
 	htListSetItemValue(&(pxTCB->xStateListItem), configMAX_PRIORITIES - pxTCB->uxPriority);
 	pxTCB->uxTaskState = HT_TASK_READY;
 	htListInsertEnd(&(pxReadyTasksLists[pxTCB->uxPriority]), &(pxTCB->xStateListItem));
+	htSchedRecordReadyPriority(pxTCB->uxPriority);
+	htSchedNotifyTaskEnqueued(pxTCB);
 	return pxCurrentTCB == NULL || pxTCB->uxPriority > pxCurrentTCB->uxPriority ? htTRUE : htFALSE;
 }
 
 /**
  * @brief 按指定动作修改目标任务的通知值，并在需要时唤醒它。
- *
- * @param[in,out] pxTCB 目标任务。
- * @param[in] ulValue 参与运算的值，具体含义由 xAction 决定。
- * @param[in] xAction 通知动作，取值见 htNotifyAction_t。
- * @param[out] pxYieldRequired 若唤醒的任务优先级更高则置 htTRUE，可为 NULL。
- *
- * @return 通知已投递返回 htPASS；动作非法或"不覆盖已有值"检查失败返回 htFAIL。
- *
- * @note 目标不在等待状态时通知值照样更新，只是不会唤醒它。
  */
 static BaseType_t prvNotifyTask(htTCB_t *pxTCB, uint32_t ulValue, htNotifyAction_t xAction, BaseType_t *pxYieldRequired)
 {
@@ -800,6 +764,7 @@ static BaseType_t prvNotifyTask(htTCB_t *pxTCB, uint32_t ulValue, htNotifyAction
 	}
 	return htPASS;
 }
+#endif /* configUSE_TASK_NOTIFICATIONS */
 
 /**
  * @brief 恢复被挂起的任务。
@@ -831,7 +796,10 @@ void htTaskResume(TaskHandle_t xTaskToResume)
  */
 BaseType_t htTaskResumeFromISR(TaskHandle_t xTaskToResume)
 {
-	return prvResumeTask((htTCB_t *)xTaskToResume);
+	const UBaseType_t uxSavedStatus = htEnterCriticalFromISR();
+	const BaseType_t xYieldRequired = prvResumeTask((htTCB_t *)xTaskToResume);
+	htExitCriticalFromISR(uxSavedStatus);
+	return xYieldRequired;
 }
 
 /**
@@ -887,7 +855,10 @@ BaseType_t htTaskNotifyFromISR(
 	if (pxHigherPriorityTaskWoken != NULL) {
 		*pxHigherPriorityTaskWoken = htFALSE;
 	}
-	return prvNotifyTask((htTCB_t *)xTaskToNotify, ulValue, xAction, pxHigherPriorityTaskWoken);
+	const UBaseType_t uxSavedStatus = htEnterCriticalFromISR();
+	const BaseType_t xReturn = prvNotifyTask((htTCB_t *)xTaskToNotify, ulValue, xAction, pxHigherPriorityTaskWoken);
+	htExitCriticalFromISR(uxSavedStatus);
+	return xReturn;
 #else
 	(void)xTaskToNotify;
 	(void)ulValue;
@@ -1081,35 +1052,13 @@ void htTaskStartScheduler(void)
 }
 
 /**
- * @brief 请求一次上下文切换：置位 PendSV，让出 CPU。
- *
- * @note 写 0xE000ED04（ICSR）的 PENDSVSET 位；PendSV 被设为最低优先级，
- *       因此总在当前所有中断退出后才执行切换。若已在中断里，则等中断返回时切换。
- * @note 主机单元测试下改调 htHostTestYieldHook()，不触碰硬件寄存器。
+ * @brief 请求一次上下文切换：通过移植层 htPortYield() 挂起 PendSV 让出 CPU。
  */
 void htTaskYield(void)
 {
-#if defined(HTOS_HOST_TEST)
-	extern void htHostTestYieldHook(void);
-	htHostTestYieldHook();
-#else
-	/* 触发 PendSV：向 ICSR 的 PENDSVSET 位写 1，请求一次上下文切换。 */
-	*((volatile uint32_t *)0xE000ED04) = 0x10000000; /* ICSR 寄存器，置位 PENDSVSET */
-#endif
-
-	/*
-	 * 早期版本在这里还补了两条内存屏障，实测非必需，已注释掉：
-	 *   __asm volatile ("dsb" ::: "memory");
-	 *   __asm volatile ("isb");
-	 */
+	htPortYield();
 }
 
-/**
- * @brief 扫描当前延时链表，把所有已到期的任务搬回就绪链表。
- *
- * @note 链表按唤醒时刻升序排列，所以一旦表头都没到期就可以停止。
- * @note 一次 tick 可能同时叫醒多个任务，因此用 do/while 逐个处理。
- */
 void htTaskCheckDelayedTasks(void)
 {
 	/* 防御：延时链表尚未初始化时直接返回。 */
@@ -1120,8 +1069,14 @@ void htTaskCheckDelayedTasks(void)
 	/* 先取一次 tick 快照，整轮判断都用它，避免中途 tick 变化导致误判。 */
 	TickType_t xCurrentTickCount = xTickCount;
 
+	/* O(1) 快速路径：最早唤醒时刻尚未到达时直接跳过链表检查。 */
+	if (xCurrentTickCount < xNextTaskUnblockTime) {
+		return;
+	}
+
 	/* 溢出列表要等 tick 回绕交换后才能检查，否则会被提前唤醒。 */
-	if (pxDelayedTaskList->uxNumberOfItems == 0) {
+	if (pxDelayedTaskList->uxNumberOfItems == 0U) {
+		xNextTaskUnblockTime = (TickType_t)htBLOCKED_INDEFINITELY;
 		return;
 	}
 	/* 循环处理所有到期任务：一次 tick 可能唤醒多个。 */
@@ -1157,12 +1112,12 @@ void htTaskCheckDelayedTasks(void)
 
 				/* 再挂回对应优先级的就绪链表尾部。 */
 				if (pxTCB->uxPriority < configMAX_PRIORITIES) {
-					/* 状态改回就绪。 */
+					/* 状态改回就绪，并同步重置排序键与 O(1) 位图。 */
 					pxTCB->uxTaskState = HT_TASK_READY;
-
-					/* 把容器指针指向就绪链表，再插入链表尾部。 */
-					pxItem->pxContainer = &(pxReadyTasksLists[pxTCB->uxPriority]);
+					htListSetItemValue(pxItem, configMAX_PRIORITIES - pxTCB->uxPriority);
 					htListInsertEnd(&(pxReadyTasksLists[pxTCB->uxPriority]), pxItem);
+					htSchedRecordReadyPriority(pxTCB->uxPriority);
+					htSchedNotifyTaskEnqueued(pxTCB);
 				}
 			} else {
 				/* 属主非法：丢掉这个坏节点，继续处理下一个。 */
@@ -1173,6 +1128,9 @@ void htTaskCheckDelayedTasks(void)
 
 		/* 只要本轮摘过节点就再查一次：可能还有同一时刻到期的任务。 */
 	} while (xListItemRemoved == htTRUE);
+
+	/* 刷新下一最早唤醒时刻缓存。 */
+	prvResetNextTaskUnblockTime();
 }
 
 /**
@@ -1192,19 +1150,20 @@ __attribute__((weak)) void htTickHook(void) {}
 
 void htTaskTickInc(void)
 {
-	/* 整段处理在关中断下完成，保证 tick 递增与延时时序一致。 */
-	__disable_irq();
+	/* 保存/恢复中断屏蔽状态，防止高优先级 ISR 抢占破坏 tick 与延时链表。 */
+	const UBaseType_t uxSavedStatus = htEnterCriticalFromISR();
 
-	/* 计量本次滴答中断本身的开销：起点含上面这条关中断，止点在开中断之前。 */
+	/* 计量本次滴答中断本身的开销：起点在屏蔽中断之后，止点在恢复中断之前。 */
 	HT_LATENCY_TICK_BEGIN();
 
 	/* 递增系统滴答计数。 */
 	xTickCount++;
 	if (xTickCount == 0U) {
-		/* tick 回绕后，之前跨越回绕点的任务成为当前延时任务。 */
+		/* tick 回绕后，之前跨越回绕点的任务成为当前延时任务，并立刻刷新最早唤醒时刻缓存。 */
 		htList_t *pxTemporary = pxDelayedTaskList;
 		pxDelayedTaskList = pxOverflowDelayedTaskList;
 		pxOverflowDelayedTaskList = pxTemporary;
+		prvResetNextTaskUnblockTime();
 	}
 
 #if (configUSE_TICK_HOOK == 1)
@@ -1234,14 +1193,13 @@ void htTaskTickInc(void)
 	if (pxCurrentTCB != NULL) {
 		if (htSchedulerNeedsSwitch()) {
 			/* 置 PENDSVSET，等中断退出后执行切换。 */
-			SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
+			htPortRequestSwitchFromISR();
 		}
 	}
-	/* 结算本次滴答中断的耗时，然后重新开中断。 */
+	/* 结算本次滴答中断的耗时，然后恢复中断屏蔽。 */
 	HT_LATENCY_TICK_END();
 
-	/* 重新开中断。 */
-	__enable_irq();
+	htExitCriticalFromISR(uxSavedStatus);
 }
 
 /**
@@ -1272,10 +1230,24 @@ void htTaskDelete(TaskHandle_t xTaskToDelete)
 	/* 先禁用中断 */
 	htEnterCritical();
 
+	/* 防重复删除：仅当任务仍在已分配总表或活动链表内时才递减计数。 */
+#if (configUSE_TRACE_FACILITY == 1)
+	const BaseType_t xWasAllocated = (pxTCB->xAllListItem.pxContainer == &pxAllocatedTasksList) ? htTRUE : htFALSE;
+#else
+	const BaseType_t xWasAllocated =
+			(pxTCB->xStateListItem.pxContainer != NULL || pxTCB->xEventListItem.pxContainer != NULL ||
+					pxTCB->uxTaskState != HT_TASK_SUSPENDED)
+					? htTRUE
+					: htFALSE;
+#endif
+
 	/* 从状态、事件和全局跟踪列表中移除任务。 */
 	htListRemove(&(pxTCB->xStateListItem));
+	htSchedClearReadyPriorityIfEmpty(pxTCB->uxPriority);
 	htListRemove(&(pxTCB->xEventListItem));
+#if (configUSE_TRACE_FACILITY == 1)
 	htListRemove(&(pxTCB->xAllListItem));
+#endif
 
 	if (xDeleteCurrentTask == htTRUE) {
 		pxTCB->uxTaskState = HT_TASK_SUSPENDED;
@@ -1283,8 +1255,8 @@ void htTaskDelete(TaskHandle_t xTaskToDelete)
 		htListInsertEnd(&xTasksWaitingTermination, &(pxTCB->xStateListItem));
 	}
 
-	/* 递减任务计数器 */
-	if (uxCurrentNumberOfTasks > 0U) {
+	/* 仅在任务原本在册时递减任务计数器 */
+	if (xWasAllocated == htTRUE && uxCurrentNumberOfTasks > 0U) {
 		uxCurrentNumberOfTasks--;
 	}
 
@@ -1352,7 +1324,7 @@ void htRunTimeSample(void)
 
 	s_ullTotalCycles += ulDelta;
 	if (pxCurrentTCB != NULL) {
-		pxCurrentTCB->ulRunTimeCounter += ulDelta;
+		pxCurrentTCB->ullRunTimeCounter += ulDelta;
 		if ((TaskHandle_t)pxCurrentTCB == htTaskGetIdleHandle()) {
 			s_ullIdleCycles += ulDelta;
 		}
@@ -1370,12 +1342,10 @@ void htRunTimeSample(void)
  */
 static void prvReadRunTimeCounters(uint64_t *pullTotal, uint64_t *pullIdle)
 {
-	const uint32_t ulPrimask = __get_PRIMASK();
-
-	__disable_irq();
+	const uint32_t ulSaved = htPortEnterAtomicRaw();
 	*pullTotal = s_ullTotalCycles;
 	*pullIdle = s_ullIdleCycles;
-	__set_PRIMASK(ulPrimask);
+	htPortExitAtomicRaw(ulSaved);
 }
 
 #endif /* configGENERATE_RUN_TIME_STATS */
@@ -1388,23 +1358,37 @@ static void prvReadRunTimeCounters(uint64_t *pullTotal, uint64_t *pullIdle)
  * @note configGENERATE_RUN_TIME_STATS 为 0 时恒返回 0，表示没有这项数据，
  *       而不是表示系统一直空闲。
  */
+#if (configGENERATE_RUN_TIME_STATS == 1) || (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
+/**
+ * @brief 用等比右移 + 32 位硬件 UDIV 计算 64 位占比（0..100），消除 __udivmoddi4（省 ~754 B Flash）。
+ */
+static uint32_t prvCalcPercent64(uint64_t ullPart, uint64_t ullTotal)
+{
+	if (ullTotal == 0U) {
+		return 0U;
+	}
+	if (ullPart >= ullTotal) {
+		return 100U;
+	}
+	while (ullTotal > (uint64_t)(UINT32_MAX / 100U)) {
+		ullPart >>= 1U;
+		ullTotal >>= 1U;
+	}
+	return (uint32_t)(((uint32_t)ullPart * 100U) / (uint32_t)ullTotal);
+}
+#endif
+
 uint32_t htGetIdleRunTimePercent(void)
 {
+#if (configGENERATE_RUN_TIME_STATS == 1)
 	uint64_t ullTotal;
 	uint64_t ullIdle;
 
-#if (configGENERATE_RUN_TIME_STATS == 1)
 	prvReadRunTimeCounters(&ullTotal, &ullIdle);
+	return prvCalcPercent64(ullIdle, ullTotal);
 #else
-	ullTotal = 0U;
-	ullIdle = 0U;
+	return 0U;
 #endif
-
-	if (ullTotal == 0U) {
-		/* 还没有样本：返回 0 而不是 100%，避免把"没有数据"误报成"一直空闲"。 */
-		return 0U;
-	}
-	return (uint32_t)((ullIdle * 100U) / ullTotal);
 }
 
 /**
@@ -1425,7 +1409,7 @@ uint32_t htGetCPUUsage(void)
 		/* 还没有样本：与空闲占比一致地返回 0，而不是 100% 满载。 */
 		return 0U;
 	}
-	ulIdlePercent = (uint32_t)((ullIdle * 100U) / ullTotal);
+	ulIdlePercent = prvCalcPercent64(ullIdle, ullTotal);
 	return (ulIdlePercent >= 100U) ? 0U : (100U - ulIdlePercent);
 #else
 	return 0U;
@@ -1440,18 +1424,16 @@ uint32_t htGetCPUUsage(void)
  */
 uint64_t htGetRunTimeCounter(void)
 {
+#if (configGENERATE_RUN_TIME_STATS == 1)
 	uint64_t ullTotal;
 	uint64_t ullIdle;
 
-#if (configGENERATE_RUN_TIME_STATS == 1)
 	prvReadRunTimeCounters(&ullTotal, &ullIdle);
 	(void)ullIdle;
-#else
-	ullTotal = 0U;
-	ullIdle = 0U;
-#endif
-
 	return ullTotal;
+#else
+	return 0U;
+#endif
 }
 
 #if (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
@@ -1554,21 +1536,34 @@ size_t htTaskList(char *pcWriteBuffer, size_t uxBufferSize)
 
 	prvStatsPutString(&xWriter, "name     s prio stk rt%\r\n");
 
-	/* 遍历中 tick 处理可能改动链表，整段关中断；因此本函数只适合调试输出。 */
-	htEnterCritical();
+	/*
+	 * 仅挂起调度器而非全程关中断：防止空闲任务回收或其它任务删除 TCB，同时
+	 * 保证全任务栈水位扫描与字符串格式化期间硬件中断完全不被屏蔽。
+	 */
+	htSuspendScheduler();
 	ullTotal = htGetRunTimeCounter();
-	/* 用「剩余项数」而不是「下一个是否为空」作为循环条件：pxAllocatedTasksList
-	   是自身成环的双向链表，走到表尾后 htListGetNext() 会回到表头，靠空指针
-	   判断会一直转下去。 */
 	uxRemaining = htListGetCurrentNumberOfItems(&pxAllocatedTasksList);
 	pxItem = htListGetHead(&pxAllocatedTasksList);
 	while ((pxItem != NULL) && (uxRemaining > 0U)) {
+		uint64_t ullTaskCycles;
+		uint32_t ulSaved;
+
 		pxTask = (htTCB_t *)htListGetItemOwner(pxItem);
 		pxItem = htListGetNext(pxItem);
 		uxRemaining--;
 		if (pxTask == NULL) {
 			continue;
 		}
+
+		/* 仅在读取 64 位任务周期计数的一瞬间做原子保护（约数个时钟周期）。 */
+#if (configGENERATE_RUN_TIME_STATS == 1)
+		ulSaved = htPortEnterAtomicRaw();
+		ullTaskCycles = pxTask->ullRunTimeCounter;
+		htPortExitAtomicRaw(ulSaved);
+#else
+		(void)ulSaved;
+		ullTaskCycles = 0U;
+#endif
 
 		prvStatsPutName(&xWriter, pxTask->pcTaskName);
 		prvStatsPutChar(&xWriter, ' ');
@@ -1578,15 +1573,11 @@ size_t htTaskList(char *pcWriteBuffer, size_t uxBufferSize)
 		prvStatsPutChar(&xWriter, ' ');
 		prvStatsPutUint(&xWriter, (uint32_t)htGetTaskStackHighWaterMark((TaskHandle_t)pxTask));
 		prvStatsPutChar(&xWriter, ' ');
-		if (ullTotal == 0U) {
-			ulPercent = 0U;
-		} else {
-			ulPercent = (uint32_t)(((uint64_t)pxTask->ulRunTimeCounter * 100U) / ullTotal);
-		}
+		ulPercent = prvCalcPercent64(ullTaskCycles, ullTotal);
 		prvStatsPutUint(&xWriter, ulPercent);
 		prvStatsPutString(&xWriter, "%\r\n");
 	}
-	htExitCritical();
+	htResumeScheduler();
 
 	return xWriter.uxLength;
 }

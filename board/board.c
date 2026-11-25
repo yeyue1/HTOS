@@ -70,6 +70,16 @@ static UART_HandleTypeDef s_console;
 static IWDG_HandleTypeDef s_watchdog;
 static uint32_t s_clock_status = BOARD_CLOCK_ERR_HAL_INIT;
 
+#if (BOARD_CONSOLE_ASYNC_TX == 1)
+_Static_assert(
+		(BOARD_CONSOLE_TX_BUF_SIZE >= 16U) && ((BOARD_CONSOLE_TX_BUF_SIZE & (BOARD_CONSOLE_TX_BUF_SIZE - 1U)) == 0U),
+		"BOARD_CONSOLE_TX_BUF_SIZE must be a power of 2 >= 16");
+#define BOARD_CONSOLE_TX_MASK (BOARD_CONSOLE_TX_BUF_SIZE - 1U)
+static uint8_t s_tx_ring[BOARD_CONSOLE_TX_BUF_SIZE];
+static volatile uint32_t s_tx_head = 0U;
+static volatile uint32_t s_tx_tail = 0U;
+#endif
+
 /* -------------------------------------------------------------------------- */
 /* HAL MSP 钩子                                                               */
 /* -------------------------------------------------------------------------- */
@@ -130,8 +140,14 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
 	gpio.Speed = GPIO_SPEED_FREQ_HIGH;
 	HAL_GPIO_Init(BOARD_CONSOLE_DE_GPIO_PORT, &gpio);
 
-	/* 这里故意不使能 NVIC，也不提供 USART3_IRQHandler：控制台只用轮询/阻塞发送，
-	   因此整条串口路径上一个中断都没有。 */
+#if (BOARD_CONSOLE_ASYNC_TX == 1)
+	/* 异步发送模式：USART3 中断优先级必须 >= configMAX_SYSCALL_INTERRUPT_PRIORITY（数值更大），
+	 * 避免抢占 BASEPRI 保护区内的临界区代码；默认取 10U。 */
+	HAL_NVIC_SetPriority(USART3_IRQn, 10U, 0U);
+	HAL_NVIC_EnableIRQ(USART3_IRQn);
+#else
+	/* 默认轮询模式：故意不使能 NVIC，整条串口路径零中断。 */
+#endif
 }
 
 /* -------------------------------------------------------------------------- */
@@ -248,11 +264,32 @@ void board_console_init(void)
  */
 static void prv_console_tx(const char *text, uint32_t length)
 {
-	uint32_t attempt;
-
 	if ((text == NULL) || (length == 0U)) {
 		return;
 	}
+
+#if (BOARD_CONSOLE_ASYNC_TX == 1)
+	for (uint32_t index = 0U; index < length; index++) {
+		uint32_t spin = 200000U;
+		while ((((s_tx_head + 1U) & BOARD_CONSOLE_TX_MASK) == s_tx_tail) && (spin > 0U)) {
+			spin--;
+		}
+
+		const uint32_t primask = __get_PRIMASK();
+		__disable_irq();
+		const uint32_t next_head = (s_tx_head + 1U) & BOARD_CONSOLE_TX_MASK;
+		if (next_head != s_tx_tail) {
+			s_tx_ring[s_tx_head] = (uint8_t)text[index];
+			s_tx_head = next_head;
+			/* 拉高 RS485 方向脚并关闭 TCIE，开启 TXEIE 由中断逐字节移出。 */
+			BOARD_CONSOLE_DE_GPIO_PORT->BSRR = (uint32_t)BOARD_CONSOLE_DE_PIN;
+			BOARD_CONSOLE_UART->CR1 &= ~USART_CR1_TCIE;
+			BOARD_CONSOLE_UART->CR1 |= USART_CR1_TXEIE;
+		}
+		__set_PRIMASK(primask);
+	}
+#else
+	uint32_t attempt;
 
 	/* RS485 是半双工：先使能驱动器，发完再把总线放开，让适配器有机会回话。
 	   HAL_UART_Transmit() 是在 TC 之后才返回的，也就是最后一个停止位已经移出
@@ -269,7 +306,39 @@ static void prv_console_tx(const char *text, uint32_t length)
 	}
 
 	HAL_GPIO_WritePin(BOARD_CONSOLE_DE_GPIO_PORT, BOARD_CONSOLE_DE_PIN, GPIO_PIN_RESET);
+#endif
 }
+
+#if (BOARD_CONSOLE_ASYNC_TX == 1)
+void board_console_irq_handler(void)
+{
+	const uint32_t sr = BOARD_CONSOLE_UART->SR;
+	const uint32_t cr1 = BOARD_CONSOLE_UART->CR1;
+
+	if (((sr & USART_SR_TXE) != 0U) && ((cr1 & USART_CR1_TXEIE) != 0U)) {
+		if (s_tx_tail != s_tx_head) {
+			const uint8_t byte = s_tx_ring[s_tx_tail];
+			s_tx_tail = (s_tx_tail + 1U) & BOARD_CONSOLE_TX_MASK;
+			BOARD_CONSOLE_UART->DR = byte;
+		} else {
+			/* 环形缓冲区已空：关闭 TXEIE，开启 TCIE 等待最后一字节停止位移出后再拉低 DE。 */
+			BOARD_CONSOLE_UART->CR1 &= ~USART_CR1_TXEIE;
+			BOARD_CONSOLE_UART->CR1 |= USART_CR1_TCIE;
+		}
+	}
+
+	if (((sr & USART_SR_TC) != 0U) && ((cr1 & USART_CR1_TCIE) != 0U)) {
+		BOARD_CONSOLE_UART->CR1 &= ~USART_CR1_TCIE;
+		BOARD_CONSOLE_UART->SR = ~USART_SR_TC;
+		if (s_tx_tail == s_tx_head) {
+			BOARD_CONSOLE_DE_GPIO_PORT->BSRR = ((uint32_t)BOARD_CONSOLE_DE_PIN << 16U);
+		} else {
+			/* 等待 TC 期间又有新数据入队：重新打开 TXEIE 继续发送。 */
+			BOARD_CONSOLE_UART->CR1 |= USART_CR1_TXEIE;
+		}
+	}
+}
+#endif
 
 /**
  * @brief 发送一个字符。
@@ -304,6 +373,41 @@ void board_console_write(const char *text, uint32_t length)
 		text += chunk;
 		length -= chunk;
 	}
+}
+
+void board_console_write_panic(const char *text, uint32_t length)
+{
+	uint32_t index;
+
+	if ((text == NULL) || (length == 0U)) {
+		return;
+	}
+
+	/* 仅在 USART3 与发送器已使能时输出，避免时钟未开时死等状态位。 */
+	if ((BOARD_CONSOLE_UART->CR1 & (USART_CR1_UE | USART_CR1_TE)) != (USART_CR1_UE | USART_CR1_TE)) {
+		return;
+	}
+
+	/* 关闭异步发送中断并绕过 HAL_UART 句柄锁与 SysTick，直接拉高 RS485 DE 并按 TXE/TC 轮询发送。 */
+	BOARD_CONSOLE_UART->CR1 &= ~(USART_CR1_TXEIE | USART_CR1_TCIE);
+	BOARD_CONSOLE_DE_GPIO_PORT->BSRR = (uint32_t)BOARD_CONSOLE_DE_PIN;
+
+	for (index = 0U; index < length; index++) {
+		uint32_t spin = 200000U;
+		while (((BOARD_CONSOLE_UART->SR & USART_SR_TXE) == 0U) && (spin > 0U)) {
+			spin--;
+		}
+		BOARD_CONSOLE_UART->DR = (uint8_t)text[index];
+	}
+
+	{
+		uint32_t spin = 200000U;
+		while (((BOARD_CONSOLE_UART->SR & USART_SR_TC) == 0U) && (spin > 0U)) {
+			spin--;
+		}
+	}
+
+	BOARD_CONSOLE_DE_GPIO_PORT->BSRR = ((uint32_t)BOARD_CONSOLE_DE_PIN << 16U);
 }
 
 /* -------------------------------------------------------------------------- */

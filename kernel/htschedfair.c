@@ -16,13 +16,9 @@
 #include "htschedpolicy.h"
 #include "htscheduler.h"
 #include "htlist.h"
+#include "htkernel_internal.h"
 
 #if (configUSE_SCHED_POLICY_FAIR_SHARE == 1)
-
-/** 各优先级的就绪链表。 */
-extern htList_t pxReadyTasksLists[];
-/** 当前运行的任务。 */
-extern htTCB_t *pxCurrentTCB;
 
 /** 步长计算基数：基数 / 权重 = 步长；权重 1024 时步长正好 1024。 */
 #define HT_FAIR_STRIDE_SCALE 1048576U
@@ -37,16 +33,37 @@ extern htTCB_t *pxCurrentTCB;
  */
 #define HT_FAIR_WAKE_MARGIN 4096U
 
-/** 虚拟时间下界（单调不减）：唤醒保护以它为基准，对应 Linux 的 min_vruntime。 */
-static uint32_t s_ulMinVruntime = 0U;
+/** 各优先级独立的虚拟时间单调下界，杜绝高优先级任务污染低优先级公平份额。 */
+static uint32_t s_aulMinVruntime[configMAX_PRIORITIES];
+static uint8_t s_aucMinVruntimeValid[configMAX_PRIORITIES];
 
-/**
- * @brief 把任务恢复到"刚加入公平队列"的状态。
- *
- * @note 步长由用户通过 htSchedSetWeight() 设置，是任务参数，热切换时必须保留；
- *       只有从未设置过（步长为 0）的任务才落回标准份额。虚拟时间是策略的记账
- *       状态，每次重新接管都清零，避免带着上一轮的差距进入新一轮比较。
- */
+static void prvFairAdvanceFloor(UBaseType_t uxPriority, uint32_t ulCandidate)
+{
+	if (uxPriority >= configMAX_PRIORITIES) {
+		return;
+	}
+	if (s_aucMinVruntimeValid[uxPriority] == 0U) {
+		s_aulMinVruntime[uxPriority] = ulCandidate;
+		s_aucMinVruntimeValid[uxPriority] = 1U;
+	} else if ((int32_t)(ulCandidate - s_aulMinVruntime[uxPriority]) > 0) {
+		s_aulMinVruntime[uxPriority] = ulCandidate;
+	}
+}
+
+static void prvFairClampWokenTask(htTCB_t *pxTask)
+{
+	if (pxTask == NULL || pxTask->uxPriority >= configMAX_PRIORITIES) {
+		return;
+	}
+	if (s_aucMinVruntimeValid[pxTask->uxPriority] == 0U) {
+		return;
+	}
+	const uint32_t ulFloor = s_aulMinVruntime[pxTask->uxPriority];
+	if ((int32_t)(pxTask->ulVruntime - ulFloor) < -(int32_t)HT_FAIR_WAKE_MARGIN) {
+		pxTask->ulVruntime = ulFloor - HT_FAIR_WAKE_MARGIN;
+	}
+}
+
 static void prvFairInitTask(htTCB_t *pxTask)
 {
 	if (pxTask != NULL) {
@@ -57,15 +74,15 @@ static void prvFairInitTask(htTCB_t *pxTask)
 	}
 }
 
-/**
- * @brief 策略初始化：把当前已存在的任务全部纳入公平队列。
- */
 static void prvFairInitialise(void)
 {
 	UBaseType_t uxCount = htListGetCurrentNumberOfItems(&pxAllocatedTasksList);
 	htListItem_t *pxItem = htListGetHead(&pxAllocatedTasksList);
 
-	s_ulMinVruntime = 0U;
+	for (UBaseType_t uxPriority = 0U; uxPriority < (UBaseType_t)configMAX_PRIORITIES; uxPriority++) {
+		s_aulMinVruntime[uxPriority] = 0U;
+		s_aucMinVruntimeValid[uxPriority] = 0U;
+	}
 
 	for (UBaseType_t uxIndex = 0U; (uxIndex < uxCount) && (pxItem != NULL); uxIndex++) {
 		prvFairInitTask((htTCB_t *)htListGetItemOwner(pxItem));
@@ -73,9 +90,6 @@ static void prvFairInitialise(void)
 	}
 }
 
-/**
- * @brief 滴答记账：正在运行的任务虚拟时间加一个步长。
- */
 static void prvFairTick(htTCB_t *pxCurrent)
 {
 	if (pxCurrent != NULL) {
@@ -85,43 +99,40 @@ static void prvFairTick(htTCB_t *pxCurrent)
 		}
 		pxCurrent->ulVruntime += pxCurrent->ulStride;
 
-		/* 没有同优先级竞争者时，把下界抬到当前值，供唤醒保护使用。 */
-		if (htListGetCurrentNumberOfItems(&(pxReadyTasksLists[pxCurrent->uxPriority])) <= 1U) {
-			s_ulMinVruntime = pxCurrent->ulVruntime;
+		/* 没有同优先级竞争者时单调抬升本优先级下界，不影响其他优先级。 */
+		if (pxCurrent->uxPriority < configMAX_PRIORITIES &&
+				htListGetCurrentNumberOfItems(&(pxReadyTasksLists[pxCurrent->uxPriority])) <= 1U) {
+			prvFairAdvanceFloor(pxCurrent->uxPriority, pxCurrent->ulVruntime);
 		}
 	}
 }
 
-/**
- * @brief 从最高优先级就绪表里挑虚拟时间最小的任务。
- *
- * @note 先扫一遍求最小值，把落后过多的任务拉回窗口内，再扫一遍选最小。
- *       同优先级任务数很少（个位数），两次线性扫描的代价可以忽略。
- */
 static htTCB_t *prvFairSelectNext(void)
 {
-	htList_t *pxList = &(pxReadyTasksLists[htSchedGetTopReadyPriority()]);
+	const UBaseType_t uxTopPriority = htSchedGetTopReadyPriority();
+	htList_t *pxList = &(pxReadyTasksLists[uxTopPriority]);
 	UBaseType_t uxCount = htListGetCurrentNumberOfItems(pxList);
 	htListItem_t *pxItem = htListGetHead(pxList);
-	uint32_t ulMinVruntime = UINT32_MAX;
+	uint32_t ulMinVruntime = 0U;
+	BaseType_t xFoundAny = htFALSE;
 
-	/* 第一遍：求当前最小虚拟时间。 */
+	/* 第一遍：用有符号差值求当前最小虚拟时间，跨越 32 位回绕点依然正确。 */
 	for (UBaseType_t uxIndex = 0U; (uxIndex < uxCount) && (pxItem != NULL); uxIndex++) {
 		htTCB_t *pxTask = (htTCB_t *)htListGetItemOwner(pxItem);
-		if (pxTask != NULL && pxTask->ulVruntime < ulMinVruntime) {
-			ulMinVruntime = pxTask->ulVruntime;
+		if (pxTask != NULL) {
+			if (xFoundAny == htFALSE || (int32_t)(pxTask->ulVruntime - ulMinVruntime) < 0) {
+				ulMinVruntime = pxTask->ulVruntime;
+				xFoundAny = htTRUE;
+			}
 		}
 		pxItem = htListGetNext(pxItem);
 	}
-	if (ulMinVruntime == UINT32_MAX) {
+	if (xFoundAny == htFALSE) {
 		return NULL;
 	}
 
-	/* 下界只升不降：睡醒的任务带着旧虚拟时间回来时，用历史下界而不是
-	   它自己的旧值做基准，才认得出"落后太多"。 */
-	if ((int32_t)(ulMinVruntime - s_ulMinVruntime) > 0) {
-		s_ulMinVruntime = ulMinVruntime;
-	}
+	/* 本优先级下界单调不减。 */
+	prvFairAdvanceFloor(uxTopPriority, ulMinVruntime);
 
 	/* 第二遍：唤醒保护 + 选最小。 */
 	htTCB_t *pxBest = NULL;
@@ -129,10 +140,7 @@ static htTCB_t *prvFairSelectNext(void)
 	for (UBaseType_t uxIndex = 0U; (uxIndex < uxCount) && (pxItem != NULL); uxIndex++) {
 		htTCB_t *pxTask = (htTCB_t *)htListGetItemOwner(pxItem);
 		if (pxTask != NULL) {
-			/* 落后超过唤醒窗口的任务，把虚拟时间抬到窗口边缘。 */
-			if ((int32_t)(pxTask->ulVruntime - s_ulMinVruntime) < -(int32_t)HT_FAIR_WAKE_MARGIN) {
-				pxTask->ulVruntime = s_ulMinVruntime - HT_FAIR_WAKE_MARGIN;
-			}
+			prvFairClampWokenTask(pxTask);
 			if (pxBest == NULL || (int32_t)(pxTask->ulVruntime - pxBest->ulVruntime) < 0) {
 				pxBest = pxTask;
 			}
@@ -152,14 +160,11 @@ static BaseType_t prvFairShouldPreempt(htTCB_t *pxCurrent)
 
 #if (configUSE_PREEMPTION == 1)
 	if (pxCurrent != NULL) {
-		UBaseType_t uxCurrentPriority = pxCurrent->uxPriority;
+		const UBaseType_t uxCurrentPriority = pxCurrent->uxPriority;
 
-		/* 高优先级照旧绝对抢占，优先级语义不变。 */
-		for (UBaseType_t uxPriority = configMAX_PRIORITIES - 1U; uxPriority > uxCurrentPriority; uxPriority--) {
-			if (htListGetCurrentNumberOfItems(&(pxReadyTasksLists[uxPriority])) > 0U) {
-				xSwitchRequired = htTRUE;
-				break;
-			}
+		/* O(1) 位图查询：高优先级照旧绝对抢占，优先级语义不变。 */
+		if (htSchedGetTopReadyPriority() > uxCurrentPriority) {
+			xSwitchRequired = htTRUE;
 		}
 
 #if (configUSE_TIME_SLICING == 1)
@@ -214,6 +219,7 @@ const htSchedPolicy_t htSchedPolicyFairShare = {
 		prvFairTick, /* vTick */
 		prvFairSelectNext, /* pxSelectNext */
 		prvFairShouldPreempt, /* xShouldPreempt */
+		prvFairClampWokenTask, /* vTaskEnqueued */
 };
 
 #endif /* configUSE_SCHED_POLICY_FAIR_SHARE */

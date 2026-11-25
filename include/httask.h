@@ -45,7 +45,7 @@ enum {
 /**
  * @brief 任务控制块（TCB）。
  *
- * 每个任务一个 TCB，内含栈指针、三个链表项、优先级、栈基址、名字与通知状态。
+ * 按对齐粒度紧密排列以最小化内存空洞，受配置开关控制的字段在关闭时自动裁掉。
  */
 typedef struct htTaskControlBlock {
 	/**
@@ -56,31 +56,40 @@ typedef struct htTaskControlBlock {
 	StackType_t *pxTopOfStack;
 	htListItem_t xStateListItem; /**< 状态链表项：挂在就绪表或延时/挂起表中 */
 	htListItem_t xEventListItem; /**< 事件链表项：挂在队列或信号量的等待链表里 */
+#if (configUSE_TRACE_FACILITY == 1)
 	htListItem_t xAllListItem; /**< 所有任务链表项：挂在内核的任务总表上 */
-	UBaseType_t uxPriority; /**< 当前生效的优先级，优先级继承时会临时提高 */
+#endif
+#if (configGENERATE_RUN_TIME_STATS == 1)
+	uint64_t ullRunTimeCounter; /**< 任务累计运行周期计数（64 位防 59.6 s 回绕） */
+#endif
 	StackType_t *pxStack; /**< 任务栈的起始地址（栈底），栈溢出检查从这里开始扫描 */
-	char pcTaskName[configMAX_TASK_NAME_LEN]; /**< 任务名，长度含结尾的 '\0' */
-	UBaseType_t uxTaskState; /**< 任务状态，取值为 htTaskStatus_t 之一 */
-	UBaseType_t uxBasePriority; /**< 基础优先级，继承结束后用它恢复 uxPriority */
+#if (configUSE_TASK_NOTIFICATIONS == 1)
 	uint32_t ulNotifiedValue; /**< 32 位任务通知值 */
-	UBaseType_t uxNotificationStatus; /**< 任务通知状态 */
-	uint32_t ulRunTimeCounter; /**< 任务运行时间计数，供运行时统计使用 */
-	UBaseType_t uxStackDepth; /**< 栈深度，单位为 StackType_t（word） */
-	uint8_t ucStaticallyAllocated; /**< 非 0 表示 TCB 与栈由调用方提供，删除时不释放 */
+#endif
 #if (configUSE_SCHED_POLICY_FAIR_SHARE == 1)
 	uint32_t ulVruntime; /**< 公平分享策略：虚拟运行时间，单位是步长 */
 	uint32_t ulStride; /**< 公平分享策略：每运行一个 tick 增加的虚拟时间，默认 1024 */
 #endif
 #if (configUSE_SCHED_POLICY_EDF == 1)
-	TickType_t ulDeadline; /**< 最早死期策略：绝对死期（tick），0 表示没有死期 */
+	TickType_t ulDeadline; /**< 最早死期策略：绝对死期（tick） */
+#endif
+	uint16_t uxStackDepth; /**< 栈深度，单位为 StackType_t（word） */
+	uint8_t uxPriority; /**< 当前生效的优先级（0..configMAX_PRIORITIES-1） */
+	uint8_t uxBasePriority; /**< 基础优先级，继承结束后用它恢复 uxPriority */
+	uint8_t uxTaskState; /**< 任务状态，取值为 htTaskStatus_t 之一 */
+	uint8_t ucStaticallyAllocated; /**< 非 0 表示 TCB 与栈由调用方提供，删除时不释放 */
+#if (configUSE_TASK_NOTIFICATIONS == 1)
+	uint8_t uxNotificationStatus; /**< 任务通知状态 */
+#endif
+#if (configUSE_SCHED_POLICY_EDF == 1)
+	uint8_t ucHasDeadline; /**< 最早死期策略：非 0 表示已登记死期，避免 tick=0 回绕歧义 */
 	uint8_t ucDeadlineMissed; /**< 最早死期策略：本次死期是否已经记过漏期 */
 #endif
-	/* uint32_t ulDelayTime;  原始延时值，仅调试时使用，当前已注释掉 */
-
+	char pcTaskName[configMAX_TASK_NAME_LEN]; /**< 任务名，长度含结尾的 '\0' */
 } htTCB_t;
 
 /* ------------------------------------------------------------------ */
-/* 1. 全局变量                                                          */
+/* 1. 公开只读状态变量                                                  */
 /* ------------------------------------------------------------------ */
 
 /** @brief 当前正在运行的任务的 TCB。 */
@@ -89,14 +98,6 @@ extern htTCB_t *pxCurrentTCB;
 extern UBaseType_t uxCurrentNumberOfTasks;
 /** @brief 系统 tick 计数，每个 SysTick 中断加一。 */
 extern TickType_t xTickCount;
-/** @brief 所有任务的总表，遍历全部任务时使用。 */
-extern htList_t pxAllocatedTasksList;
-/** @brief 延时任务链表，按唤醒 tick 排序。 */
-extern htList_t *pxDelayedTaskList;
-/** @brief tick 计数溢出后使用的延时任务链表。 */
-extern htList_t *pxOverflowDelayedTaskList;
-/** @brief 就绪表数组，按优先级各一张链表。 */
-extern htList_t pxReadyTasksLists[];
 
 /* ------------------------------------------------------------------ */
 /* 2. 任务创建与删除                                                    */
@@ -313,10 +314,9 @@ htTaskStatus_t htTaskGetState(TaskHandle_t xTask);
  * @param[out] pcWriteBuffer 输出缓冲区，函数会把结果写成以 '\0' 结尾的多行文本。
  * @param[in]  uxBufferSize  缓冲区容量（字节），始终保留最后一个字节放结束符。
  * @return 实际写入的字符数（不含结束符）；参数非法或容量不足 1 行时返回 0。
- * @note 每行格式为 `name state p=<优先级> stk=<栈高水位字> rt=<累计周期数>`。
+ * @note 每行格式为 `name     s prio stk rt%`（带表头），其中 s 为 R/r/B/S/?。
  * @note 内部不调用 printf，也不需要堆。缓冲区不够时后面的行被丢弃，不会越界。
- * @note 遍历期间关闭中断，因此本函数只适合调试输出：缓冲区越大关中断越久，
- *       不要在高频路径上调用。
+ * @note 仅适合调试输出，不要在高频路径上调用。
  */
 size_t htTaskList(char *pcWriteBuffer, size_t uxBufferSize);
 #endif
@@ -326,9 +326,9 @@ size_t htTaskList(char *pcWriteBuffer, size_t uxBufferSize);
 /* ------------------------------------------------------------------ */
 
 /**
- * @brief 创建空闲任务，优先级为 0，供调度器在没有就绪任务时运行。
+ * @brief 启动调度器的兼容别名，内部直接转发至 htStartScheduler()。
  *
- * @return 创建成功返回 htPASS，失败返回 htFAIL。
+ * @note 正常启动后不返回；仅在没有可运行任务或空闲任务创建失败时返回。
  */
 void htTaskStartScheduler(void);
 /**

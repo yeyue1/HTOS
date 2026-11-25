@@ -30,7 +30,8 @@ typedef struct htSchedPolicy {
 	void (*vTaskCreated)(htTCB_t *pxTask); /**< 新任务初始化完成后的回调，可为 NULL */
 	void (*vTick)(htTCB_t *pxCurrent); /**< 滴答记账，可为 NULL */
 	htTCB_t *(*pxSelectNext)(void); /**< 选择下一个任务，不允许为 NULL */
-	BaseType_t (*xShouldPreempt)(htTCB_t *pxCurrent); /**< 是否需要切换，不允许为 NULL */
+	BaseType_t (*xShouldPreempt)(htTCB_t *pxCurrent); /**< 无副作用抢占判断，不允许为 NULL */
+	void (*vTaskEnqueued)(htTCB_t *pxTask); /**< 任务重新就绪（唤醒/恢复）时的回调，可为 NULL */
 } htSchedPolicy_t;
 
 /**
@@ -55,7 +56,7 @@ BaseType_t htSchedSetPolicy(const htSchedPolicy_t *pxPolicy);
 const htSchedPolicy_t *htSchedGetPolicy(void);
 
 /**
- * @brief 取当前就绪任务中优先级最高的那一档，供策略实现复用。
+ * @brief 取当前就绪任务中优先级最高的那一档，供策略实现复用（O(1) 位图 + CLZ 实现）。
  *
  * @return 最高非空就绪链表的优先级；全部为空时返回 0（空闲任务所在档）。
  */
@@ -72,6 +73,12 @@ void htSchedNotifyTaskCreated(htTCB_t *pxTask);
  * @param[in] pxCurrent 当前任务，可为 NULL（调度器尚未启动）。
  */
 void htSchedNotifyTick(htTCB_t *pxCurrent);
+
+/**
+ * @brief 通知策略"有任务重新进入就绪表"（如延时到期、队列/通知唤醒、恢复挂起）。
+ * @param[in] pxTask 重新就绪的任务 TCB，必须在临界区或关中断下调用。
+ */
+void htSchedNotifyTaskEnqueued(htTCB_t *pxTask);
 
 /** @brief 固定优先级策略（默认）：优先级高者先跑，同级按时间片轮转。 */
 extern const htSchedPolicy_t htSchedPolicyFixedPriority;
@@ -104,18 +111,31 @@ extern const htSchedPolicy_t htSchedPolicyEdf;
 /** @brief 未设置死期的标记值；绝对 tick 0 视为"没有死期"。 */
 #define HT_SCHED_NO_DEADLINE ((TickType_t)0U)
 
+/** @brief 取消任务死期的快捷入口（等价于将 ucHasDeadline 清零）。 */
+BaseType_t htSchedClearDeadline(TaskHandle_t xTask);
+
 /**
- * @brief 设置任务的绝对死期（单位 tick）。
+ * @brief 设置任务的绝对死期（单位 tick），允许传入任意 32 位值包括 0（tick 回绕安全）。
  *
  * @param[in] xTask 任务句柄。
- * @param[in] xDeadline 绝对死期，通常写成 htTaskGetTickCount() + 周期；
- *                     传 HT_SCHED_NO_DEADLINE 表示取消死期。
+ * @param[in] xDeadline 绝对死期，通常写成 xTickCount + 周期；
+ *                     传 HT_SCHED_NO_DEADLINE 为兼容旧调用语义取消死期；
+ *                     若需将绝对时刻 0 作为有效死期请使用 htSchedSetDeadlineAbsolute()。
  * @return 成功返回 htPASS；句柄为空返回 htFAIL。
  *
- * @note 设置死期会同时清掉该任务的"已漏期"标志。周期任务每次醒来都要重新设置，
- *       否则下一次漏期不会被识别。
+ * @note 设置死期会同时清掉该任务的"已漏期"标志。若调度器已启动且新死期早于当前任务，
+ *       会立即触发一次重调度。
  */
 BaseType_t htSchedSetDeadline(TaskHandle_t xTask, TickType_t xDeadline);
+
+/**
+ * @brief 设置任务的绝对死期（允许 0 作为合法回绕 tick 时刻）。
+ *
+ * @param[in] xTask 任务句柄。
+ * @param[in] xDeadline 绝对死期（任意 32 位 tick 值）。
+ * @return 成功返回 htPASS；句柄为空返回 htFAIL。
+ */
+BaseType_t htSchedSetDeadlineAbsolute(TaskHandle_t xTask, TickType_t xDeadline);
 
 /** @brief 取累计漏期次数（每个任务每次死期只计一次）。 */
 uint32_t htSchedEdfGetDeadlineMisses(void);

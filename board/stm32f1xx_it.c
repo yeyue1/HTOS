@@ -14,6 +14,7 @@
 
 #include "stm32f1xx_hal.h"
 
+#include "board.h"
 #include "htscheduler.h"
 
 /**
@@ -29,3 +30,13 @@ void SysTick_Handler(void)
 	HAL_IncTick();
 	htSchedulerTickHandler();
 }
+
+#if (BOARD_CONSOLE_ASYNC_TX == 1)
+/**
+ * @brief USART3 中断服务函数：仅在启用 BOARD_CONSOLE_ASYNC_TX 时参与编译。
+ */
+void USART3_IRQHandler(void)
+{
+	board_console_irq_handler();
+}
+#endif

@@ -13,6 +13,7 @@
 #include "htlist.h"
 #include "htschedpolicy.h"
 #include "httask.h"
+#include "htkernel_internal.h"
 
 /* ------------------------------------------------------------------ */
 /* 1. 内核全局量与依赖桩                                              */
@@ -75,6 +76,7 @@ static void setup(void)
 	for (UBaseType_t uxPriority = 0U; uxPriority < (UBaseType_t)configMAX_PRIORITIES; uxPriority++) {
 		htListInit(&(pxReadyTasksLists[uxPriority]));
 	}
+	htSchedResetReadyBitmap();
 	htListInit(&pxAllocatedTasksList);
 
 	pxCurrentTCB = NULL;
@@ -103,6 +105,7 @@ static void setup(void)
 static void prvAddReady(htTCB_t *pxTask)
 {
 	htListInsertEnd(&(pxReadyTasksLists[pxTask->uxPriority]), &(pxTask->xStateListItem));
+	htSchedRecordReadyPriority(pxTask->uxPriority);
 	htListInsertEnd(&pxAllocatedTasksList, &(pxTask->xAllListItem));
 	htSchedNotifyTaskCreated(pxTask);
 }
@@ -439,6 +442,95 @@ static void test_runtime_switch_rejects_incomplete_policy(void)
 	TEST_ASSERT_EQUAL(0, (int)uxCriticalNesting);
 }
 
+/**
+ * @brief P0 回归：EDF 策略下两个无死期任务必须公平 50/50 轮转，不得因 ShouldPreempt 副作用饿死任务 2。
+ */
+static void test_edf_no_deadline_two_tasks_rotate_without_starvation(void)
+{
+	const htSchedPolicy_t *pxPolicy = &htSchedPolicyEdf;
+	UBaseType_t uxFirst = 0U;
+	UBaseType_t uxSecond = 0U;
+
+	setup();
+	prvAddReady(&xTasks[0]);
+	prvAddReady(&xTasks[1]);
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(pxPolicy));
+
+	pxCurrentTCB = pxPolicy->pxSelectNext();
+	TEST_ASSERT(pxCurrentTCB == &xTasks[0]);
+
+	prvRunTicks(pxPolicy, 100U, &uxFirst, &uxSecond);
+	TEST_ASSERT_EQUAL(50, (int)uxFirst);
+	TEST_ASSERT_EQUAL(50, (int)uxSecond);
+	TEST_ASSERT_EQUAL(0, (int)uxCriticalNesting);
+}
+
+/**
+ * @brief P0 回归：EDF 支持绝对死期 0（tick 回绕点）并统计被抢占就绪态任务的漏期。
+ */
+static void test_edf_absolute_zero_deadline_and_preempted_miss(void)
+{
+	const htSchedPolicy_t *pxPolicy = &htSchedPolicyEdf;
+
+	setup();
+	xTasks[2].uxPriority = TEST_PRIO_HIGH;
+	prvAddReady(&xTasks[0]);
+	prvAddReady(&xTasks[1]);
+	prvAddReady(&xTasks[2]);
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(pxPolicy));
+
+	/* 绝对时刻 0 作为合法死期（发生在 0xFFFFFFFF 回绕之后）。 */
+	xTickCount = 0xFFFFFFFEU;
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetDeadlineAbsolute(&xTasks[0], 0U));
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetDeadlineAbsolute(&xTasks[1], 5U));
+
+	/* 高优先级任务 2 占据 CPU，低优先级就绪任务 0 错过绝对死期 0 时仍应记漏期。 */
+	pxCurrentTCB = &xTasks[2];
+	xTickCount = 1U;
+	pxPolicy->vTick(pxCurrentTCB);
+	TEST_ASSERT_EQUAL(1, (int)htSchedEdfGetDeadlineMisses());
+	TEST_ASSERT_EQUAL(1, (int)xTasks[0].ucDeadlineMissed);
+	TEST_ASSERT_EQUAL(0, (int)xTasks[1].ucDeadlineMissed);
+	TEST_ASSERT_EQUAL(0, (int)uxCriticalNesting);
+}
+
+/**
+ * @brief P0 回归：Fair-Share 跨优先级下界隔离，以及 32 位虚拟时间回绕比较正确性。
+ */
+static void test_fair_priority_isolation_and_vruntime_wraparound(void)
+{
+	const htSchedPolicy_t *pxPolicy = &htSchedPolicyFairShare;
+
+	setup();
+	xTasks[2].uxPriority = TEST_PRIO_HIGH;
+	prvAddReady(&xTasks[0]);
+	prvAddReady(&xTasks[1]);
+	prvAddReady(&xTasks[2]);
+	TEST_ASSERT_EQUAL(htPASS, htSchedSetPolicy(pxPolicy));
+
+	/* 给低优先级两个任务建立明确的虚拟时间差。 */
+	xTasks[0].ulVruntime = 10000U;
+	xTasks[1].ulVruntime = 12000U;
+
+	/* 高优先级任务独跑 500 tick，不得污染低优先级的下界或抹平 task0/task1 的差值。 */
+	pxCurrentTCB = &xTasks[2];
+	for (UBaseType_t uxTick = 0U; uxTick < 500U; uxTick++) {
+		pxPolicy->vTick(pxCurrentTCB);
+	}
+	/* 摘除高优先级后，低优先级应准确选中 task0 且二者差值保持不变。 */
+	htListRemove(&(xTasks[2].xStateListItem));
+	htSchedClearReadyPriorityIfEmpty(TEST_PRIO_HIGH);
+	TEST_ASSERT(pxPolicy->pxSelectNext() == &xTasks[0]);
+	TEST_ASSERT_EQUAL(10000, (int)xTasks[0].ulVruntime);
+	TEST_ASSERT_EQUAL(12000, (int)xTasks[1].ulVruntime);
+
+	/* 32 位回绕：0xFFFFFC00 早于 0x00000400，必须选中 task0。 */
+	xTasks[0].ulVruntime = 0xFFFFFC00U;
+	xTasks[1].ulVruntime = 0x00000400U;
+	TEST_ASSERT(pxPolicy->pxSelectNext() == &xTasks[0]);
+	TEST_ASSERT_EQUAL(0, (int)uxCriticalNesting);
+}
+
 int main(void)
 {
 	UnityBegin("test_schedpolicy.c");
@@ -457,6 +549,9 @@ int main(void)
 	RUN_TEST(test_runtime_switch_resets_accounting_but_keeps_weights);
 	RUN_TEST(test_runtime_switch_to_edf_keeps_deadlines);
 	RUN_TEST(test_runtime_switch_rejects_incomplete_policy);
+	RUN_TEST(test_edf_no_deadline_two_tasks_rotate_without_starvation);
+	RUN_TEST(test_edf_absolute_zero_deadline_and_preempted_miss);
+	RUN_TEST(test_fair_priority_isolation_and_vruntime_wraparound);
 
 	return UnityEnd();
 }

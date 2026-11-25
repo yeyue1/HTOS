@@ -75,6 +75,22 @@ SemaphoreHandle_t htSemaphoreCreateMutexStatic(htQUEUE_t *pxQueueBuffer);
 SemaphoreHandle_t htSemaphoreCreateRecursiveMutex(void);
 
 /**
+ * @brief 用调用方提供的控制块静态创建递归互斥量，初始为可用状态。
+ *
+ * @param[in] pxQueueBuffer 调用方提供的队列控制块。
+ * @return 递归互斥量句柄，参数非法或未启用相关开关时返回 NULL。
+ */
+SemaphoreHandle_t htSemaphoreCreateRecursiveMutexStatic(htQUEUE_t *pxQueueBuffer);
+
+/**
+ * @brief 查询递归互斥量当前持有者任务句柄。
+ *
+ * @param[in] xMutex 递归互斥量句柄。
+ * @return 当前持有者任务句柄；未持有或参数非法返回 NULL。
+ */
+TaskHandle_t htSemaphoreGetMutexHolder(SemaphoreHandle_t xMutex);
+
+/**
  * @brief 删除信号量并释放其占用的资源。
  *
  * @param[in] xSemaphore 信号量句柄。

@@ -128,16 +128,19 @@ static void test_empty_list_sentinel_has_no_owner(void)
 	htList_t list;
 	htListInit(&list);
 
-	TEST_ASSERT_NULL(htListGetItemOwner(&list.xListEnd));
-	TEST_ASSERT(list.xListEnd.pxContainer == &list);
+	/* 精简哨兵自指成环，不含 pvOwner/pxContainer，显著压缩每个链表占用的 RAM。 */
+	TEST_ASSERT(sizeof(htMiniListItem_t) < sizeof(htListItem_t));
+	TEST_ASSERT_EQUAL(UINT32_MAX, list.xListEnd.xItemValue);
+	TEST_ASSERT(list.xListEnd.pxNext == htListGetEndMarker(&list));
+	TEST_ASSERT(list.xListEnd.pxPrevious == htListGetEndMarker(&list));
 	TEST_ASSERT_NULL(htListGetHead(&list));
 }
 
 /**
  * @brief 导航辅助函数必须按「带哨兵的环」语义行走。
  *
- * 断言意图：GetFirstListItem 取哨兵的下一个；GetNext 走到末项时返回 xListEnd；
- * 从哨兵再 GetNext 回到首项，说明环是闭合的；GetItemContainer 从项反查所属链。
+ * 断言意图：GetFirstListItem 取哨兵的下一个；GetNext 走到末项时返回精简哨兵标记；
+ * 从哨兵再取 pxNext 回到首项，说明环是闭合的；GetItemContainer 从项反查所属链。
  * 后段同时验证「改写容器指针不影响链内位置」，以及 TEST_ASSERT_EQUAL 求值两次
  * 的坑——htListRemove 有副作用，必须先存进变量再断言。
  */
@@ -158,10 +161,10 @@ static void test_list_navigation_helpers_follow_the_ring(void)
 	TEST_ASSERT_EQUAL(3, htListGetLength(&list));
 	TEST_ASSERT(htListGetFirstListItem(&list) == &items[0]);
 	TEST_ASSERT(htListGetNext(&items[0]) == &items[1]);
-	/* 链表是带哨兵的环：末项的下一个是 xListEnd，而不是首项，
-	   否则遍历没有终止条件；而哨兵的下一个又回到首项，环才是闭合的。 */
-	TEST_ASSERT(htListGetNext(&items[2]) == &list.xListEnd);
-	TEST_ASSERT(htListGetNext(&list.xListEnd) == &items[0]);
+	/* 链表是带哨兵的环：末项的下一个是精简哨兵标记，而不是首项，
+	   否则遍历没有终止条件；而哨兵的 pxNext 又回到首项，环才是闭合的。 */
+	TEST_ASSERT(htListGetNext(&items[2]) == htListGetEndMarker(&list));
+	TEST_ASSERT(list.xListEnd.pxNext == &items[0]);
 	TEST_ASSERT(htListGetItemContainer(&items[1]) == &list);
 
 	/* 容器指针只是「归属」信息，可以被改写而不影响链内位置：

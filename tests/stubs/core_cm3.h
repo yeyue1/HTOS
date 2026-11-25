@@ -67,6 +67,10 @@ extern CoreDebug_Type htHostCoreDebug; /**< 主机侧 CoreDebug 替身。 */
 /** 两个内核异常号，与 ARM 的定义一致（系统异常用负数编号）。 */
 typedef enum { PendSV_IRQn = -2, SysTick_IRQn = -1 } IRQn_Type;
 
+#ifndef __NVIC_PRIO_BITS
+#define __NVIC_PRIO_BITS 4U
+#endif
+
 /**
  * @brief 设置异常优先级——主机上空实现，只吞掉参数避免未使用告警。
  *
@@ -86,7 +90,7 @@ static inline void __enable_irq(void) {}
 static inline void __DSB(void) {}
 static inline void __ISB(void) {}
 
-/* PRIMASK 在主机上没有对应物：保存/恢复对恒为 0，让临界区代码照常编译通过。 */
+/* PRIMASK / BASEPRI 在主机上没有对应物：保存/恢复对恒为 0，让临界区代码照常编译通过。 */
 static inline uint32_t __get_PRIMASK(void)
 {
 	return 0U;
@@ -94,6 +98,37 @@ static inline uint32_t __get_PRIMASK(void)
 static inline void __set_PRIMASK(uint32_t primask)
 {
 	(void)primask;
+}
+static inline uint32_t __get_BASEPRI(void)
+{
+	return 0U;
+}
+static inline void __set_BASEPRI(uint32_t basepri)
+{
+	(void)basepri;
+}
+
+static inline uint8_t __CLZ(uint32_t value)
+{
+	if (value == 0U) {
+		return 32U;
+	}
+	uint8_t count = 0U;
+	while ((value & 0x80000000U) == 0U) {
+		value <<= 1U;
+		count++;
+	}
+	return count;
+}
+
+static inline uint32_t __RBIT(uint32_t value)
+{
+	uint32_t result = 0U;
+	for (uint32_t i = 0U; i < 32U; i++) {
+		result = (result << 1U) | (value & 1U);
+		value >>= 1U;
+	}
+	return result;
 }
 
 #endif /* HTOS_TEST_CORE_CM3_H */

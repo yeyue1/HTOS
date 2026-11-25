@@ -17,11 +17,27 @@
  */
 uint32_t htTimeToTicks(uint32_t milliseconds)
 {
+#if (configTICK_RATE_HZ == 1000)
+	return milliseconds;
+#else
 	if (milliseconds == 0U) {
 		return 0U;
 	}
-	const uint64_t ticks = ((uint64_t)milliseconds * configTICK_RATE_HZ + 999U) / 1000U;
-	return ticks > UINT32_MAX ? UINT32_MAX : (uint32_t)ticks;
+	/* 纯 32 位定点数拆分商与余数，避免引入 64 位软件除法 __udivmoddi4 同时防止中间溢出。 */
+	const uint32_t ulRate = (uint32_t)configTICK_RATE_HZ;
+	const uint32_t ulSeconds = milliseconds / 1000U;
+	const uint32_t ulRemMs = milliseconds % 1000U;
+
+	if (ulSeconds > (UINT32_MAX / ulRate)) {
+		return UINT32_MAX;
+	}
+	const uint32_t ulWholeTicks = ulSeconds * ulRate;
+	const uint32_t ulRemTicks = (ulRemMs == 0U) ? 0U : (((ulRemMs * ulRate) + 999U) / 1000U);
+	if (ulRemTicks > (UINT32_MAX - ulWholeTicks)) {
+		return UINT32_MAX;
+	}
+	return ulWholeTicks + ulRemTicks;
+#endif
 }
 
 /**
@@ -34,8 +50,23 @@ uint32_t htTimeToTicks(uint32_t milliseconds)
  */
 uint32_t htTicksToTime(TickType_t ticks)
 {
-	const uint64_t milliseconds = ((uint64_t)ticks * 1000U) / configTICK_RATE_HZ;
-	return milliseconds > UINT32_MAX ? UINT32_MAX : (uint32_t)milliseconds;
+#if (configTICK_RATE_HZ == 1000)
+	return (uint32_t)ticks;
+#else
+	const uint32_t ulRate = (uint32_t)configTICK_RATE_HZ;
+	const uint32_t ulSeconds = (uint32_t)ticks / ulRate;
+	const uint32_t ulRemTicks = (uint32_t)ticks % ulRate;
+
+	if (ulSeconds > (UINT32_MAX / 1000U)) {
+		return UINT32_MAX;
+	}
+	const uint32_t ulWholeMs = ulSeconds * 1000U;
+	const uint32_t ulRemMs = (ulRemTicks * 1000U) / ulRate;
+	if (ulRemMs > (UINT32_MAX - ulWholeMs)) {
+		return UINT32_MAX;
+	}
+	return ulWholeMs + ulRemMs;
+#endif
 }
 
 /**

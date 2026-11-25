@@ -175,6 +175,10 @@ option(HTOS_STATS_FORMATTING "Compile htTaskList() and print it at boot" OFF)
 # by default: the instrument costs ~80 bytes of .bss plus a couple of DWT reads per
 # critical section, which is only worth paying when you are chasing jitter.
 option(HTOS_LATENCY_STATS "Compile the latency instrument and report it from the logger" OFF)
+option(HTOS_USE_TIMERS "Compile software timer service (configUSE_TIMERS=1)" OFF)
+option(HTOS_USE_EVENT_GROUPS "Compile 24-bit event groups (configUSE_EVENT_GROUPS=1)" OFF)
+option(HTOS_USE_BLOCK_POOL "Compile deterministic fixed-size block pool (configUSE_BLOCK_POOL=1)" OFF)
+option(HTOS_ASYNC_CONSOLE "Use interrupt-driven ring-buffered UART console TX (BOARD_CONSOLE_ASYNC_TX=1)" OFF)
 
 # --- Compile definitions -----------------------------------------------------
 target_compile_definitions(htOS PRIVATE
@@ -188,6 +192,22 @@ endif()
 
 if(HTOS_LATENCY_STATS)
   target_compile_definitions(htOS PRIVATE configUSE_LATENCY_STATS=1)
+endif()
+
+if(HTOS_USE_TIMERS)
+  target_compile_definitions(htOS PRIVATE configUSE_TIMERS=1)
+endif()
+
+if(HTOS_USE_EVENT_GROUPS)
+  target_compile_definitions(htOS PRIVATE configUSE_EVENT_GROUPS=1)
+endif()
+
+if(HTOS_USE_BLOCK_POOL)
+  target_compile_definitions(htOS PRIVATE configUSE_BLOCK_POOL=1)
+endif()
+
+if(HTOS_ASYNC_CONSOLE)
+  target_compile_definitions(htOS PRIVATE BOARD_CONSOLE_ASYNC_TX=1)
 endif()
 
 # --- Compile flags -----------------------------------------------------------

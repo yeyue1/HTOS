@@ -19,16 +19,14 @@
  */
 void htListInit(htList_t *pxList)
 {
-	/* 链表复位：项目数清零，轮转索引指向尾哨兵。 */
-	pxList->uxNumberOfItems = 0;
-	pxList->pxIndex = (htListItem_t *)&(pxList->xListEnd);
+	htListItem_t *const pxEnd = htListGetEndMarker(pxList);
 
-	/* 尾哨兵自指，构成空的双向环；同时记录 pvOwner 与所属链表。 */
-	pxList->xListEnd.xItemValue = 0xFFFFFFFF;
-	pxList->xListEnd.pxNext = (htListItem_t *)&(pxList->xListEnd);
-	pxList->xListEnd.pxPrevious = (htListItem_t *)&(pxList->xListEnd);
-	pxList->xListEnd.pvOwner = NULL;
-	pxList->xListEnd.pxContainer = pxList;
+	/* 链表复位：项目数清零，轮转索引与精简尾哨兵自指构成空环。 */
+	pxList->uxNumberOfItems = 0U;
+	pxList->pxIndex = pxEnd;
+	pxList->xListEnd.xItemValue = UINT32_MAX;
+	pxList->xListEnd.pxNext = pxEnd;
+	pxList->xListEnd.pxPrevious = pxEnd;
 }
 
 /**
@@ -39,7 +37,7 @@ void htListInit(htList_t *pxList)
 void htListItemInit(htListItem_t *pxItem)
 {
 	/* 逐字段复位：值清零，前后指针、属主与容器全部置空。 */
-	pxItem->xItemValue = 0;
+	pxItem->xItemValue = 0U;
 	pxItem->pxNext = NULL;
 	pxItem->pxPrevious = NULL;
 	pxItem->pvOwner = NULL;
@@ -52,35 +50,50 @@ void htListItemInit(htListItem_t *pxItem)
  * @param[in,out] pxList 目标链表。
  * @param[in,out] pxNewListItem 待插入的链表项；插入后其 pxContainer 指向 pxList。
  *
- * @note 键值相同的项插在已有等值项之后，保持插入的先后次序。
+ * @note 键值相同的项插在已有等值项之后，保持插入的先后次序；全程只通过
+ *       pxList->xListEnd 直接访问精简哨兵字段，严格遵守 C11 别名规则。
  * @warning 链表项必须已从其它链表摘除，否则会破坏原链表的环。
  */
 void htListInsert(htList_t *pxList, htListItem_t *pxNewListItem)
 {
-	htListItem_t *pxIterator;
-	/*
-	 * xItemValue == UINT32_MAX 与尾哨兵同值：若走通用比较循环，条件
-	 * pxNext->xItemValue <= 新值 会在哨兵处成立并绕回自身，形成死循环，
-	 * 因此直接取尾哨兵，把新项插到链表末尾。
-	 */
-	if (pxNewListItem->xItemValue == UINT32_MAX) {
-		pxIterator = pxList->xListEnd.pxPrevious;
+	htListItem_t *const pxEnd = htListGetEndMarker(pxList);
+
+	if (pxList->uxNumberOfItems == 0U) {
+		pxNewListItem->pxNext = pxEnd;
+		pxNewListItem->pxPrevious = pxEnd;
+		pxList->xListEnd.pxNext = pxNewListItem;
+		pxList->xListEnd.pxPrevious = pxNewListItem;
+	} else if (pxNewListItem->xItemValue == UINT32_MAX) {
+		/* 最大键值直接插到表尾哨兵之前。 */
+		htListItem_t *pxTail = pxList->xListEnd.pxPrevious;
+		pxNewListItem->pxNext = pxEnd;
+		pxNewListItem->pxPrevious = pxTail;
+		pxTail->pxNext = pxNewListItem;
+		pxList->xListEnd.pxPrevious = pxNewListItem;
 	} else {
-		/* 通用路径：找到最后一个键值不大于新项的节点，新项插在其后。 */
-		for (pxIterator = (htListItem_t *)&(pxList->xListEnd);
-				pxIterator->pxNext->xItemValue <= pxNewListItem->xItemValue; pxIterator = pxIterator->pxNext) {
-			/* 空循环体：逐个推进 pxIterator，直到越过所有不大于新值的节点。 */
+		/* 从首元素向后扫描，找到第一个键值严格大于新项的节点（或尾哨兵）。 */
+		htListItem_t *pxCursor = pxList->xListEnd.pxNext;
+		while (pxCursor != pxEnd && pxCursor->xItemValue <= pxNewListItem->xItemValue) {
+			pxCursor = pxCursor->pxNext;
+		}
+
+		htListItem_t *pxPrev = (pxCursor == pxEnd) ? pxList->xListEnd.pxPrevious : pxCursor->pxPrevious;
+		pxNewListItem->pxNext = pxCursor;
+		pxNewListItem->pxPrevious = pxPrev;
+
+		if (pxCursor == pxEnd) {
+			pxList->xListEnd.pxPrevious = pxNewListItem;
+		} else {
+			pxCursor->pxPrevious = pxNewListItem;
+		}
+		if (pxPrev == pxEnd) {
+			pxList->xListEnd.pxNext = pxNewListItem;
+		} else {
+			pxPrev->pxNext = pxNewListItem;
 		}
 	}
 
-	/* 接入双向环：先设置新项的前后指针，再修正两个邻居的反向指针。 */
-	pxNewListItem->pxNext = pxIterator->pxNext;
-	pxNewListItem->pxPrevious = pxIterator;
-	pxIterator->pxNext->pxPrevious = pxNewListItem;
-	pxIterator->pxNext = pxNewListItem;
-
-	/* 记录所属链表（类型擦除为 void *）并累加项目计数。 */
-	pxNewListItem->pxContainer = (void *)pxList;
+	pxNewListItem->pxContainer = pxList;
 	(pxList->uxNumberOfItems)++;
 }
 
@@ -94,16 +107,19 @@ void htListInsert(htList_t *pxList, htListItem_t *pxNewListItem)
  */
 void htListInsertEnd(htList_t *pxList, htListItem_t *pxNewListItem)
 {
-	htListItem_t *pxIndex = pxList->xListEnd.pxPrevious;
+	htListItem_t *const pxEnd = htListGetEndMarker(pxList);
+	htListItem_t *pxTail = pxList->xListEnd.pxPrevious;
 
-	/* 尾哨兵的前驱即当前尾元素，新项插在它之后。 */
-	pxNewListItem->pxNext = (htListItem_t *)&(pxList->xListEnd);
-	pxNewListItem->pxPrevious = pxIndex;
-	pxIndex->pxNext = pxNewListItem;
+	pxNewListItem->pxNext = pxEnd;
+	pxNewListItem->pxPrevious = pxTail;
+	if (pxTail == pxEnd) {
+		pxList->xListEnd.pxNext = pxNewListItem;
+	} else {
+		pxTail->pxNext = pxNewListItem;
+	}
 	pxList->xListEnd.pxPrevious = pxNewListItem;
 
-	/* 接入双向环并记录所属链表。 */
-	pxNewListItem->pxContainer = (void *)pxList;
+	pxNewListItem->pxContainer = pxList;
 	(pxList->uxNumberOfItems)++;
 }
 
@@ -122,11 +138,22 @@ UBaseType_t htListRemove(htListItem_t *pxItemToRemove)
 		return 0U;
 	}
 
-	htList_t *pxList = (htList_t *)pxItemToRemove->pxContainer;
+	htList_t *pxList = pxItemToRemove->pxContainer;
+	htListItem_t *const pxEnd = htListGetEndMarker(pxList);
 
-	/* 让前后邻居互相指引，把项目从环上摘掉。 */
-	pxItemToRemove->pxPrevious->pxNext = pxItemToRemove->pxNext;
-	pxItemToRemove->pxNext->pxPrevious = pxItemToRemove->pxPrevious;
+	/* 更新前驱的 pxNext，避免经由 htListItem_t* 写精简哨兵。 */
+	if (pxItemToRemove->pxPrevious == pxEnd) {
+		pxList->xListEnd.pxNext = pxItemToRemove->pxNext;
+	} else {
+		pxItemToRemove->pxPrevious->pxNext = pxItemToRemove->pxNext;
+	}
+
+	/* 更新后继的 pxPrevious。 */
+	if (pxItemToRemove->pxNext == pxEnd) {
+		pxList->xListEnd.pxPrevious = pxItemToRemove->pxPrevious;
+	} else {
+		pxItemToRemove->pxNext->pxPrevious = pxItemToRemove->pxPrevious;
+	}
 
 	/* 轮转索引正好指向被摘项目时退回其前驱，避免索引悬空。 */
 	if (pxList->pxIndex == pxItemToRemove) {
@@ -162,16 +189,13 @@ UBaseType_t htListGetLength(htList_t *pxList)
  */
 htListItem_t *htListGetHead(htList_t *pxList)
 {
-	/* 从尾哨兵出发，pxNext 即首元素。 */
-	htListItem_t *pxIndex = (htListItem_t *)&(pxList->xListEnd);
-
 	/* 空链表返回 NULL，避免把哨兵当成真实项目交给调用方。 */
-	if (pxList->uxNumberOfItems == 0) {
+	if (pxList->uxNumberOfItems == 0U) {
 		return NULL;
 	}
 
-	/* 返回链表头部项目。 */
-	return pxIndex->pxNext;
+	/* 直接从精简哨兵读取首元素。 */
+	return pxList->xListEnd.pxNext;
 }
 
 /**
